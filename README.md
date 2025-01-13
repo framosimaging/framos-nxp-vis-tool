@@ -17,7 +17,7 @@ $CXX display_image.cpp -o display_image
 For opencv you need to install toolchain for full image
 
 ``` bash
-DISTRO=fsl-imx-xwayland MACHINE=imx8mp-lpddr4-evk source imx-setup-release.sh -b build-wayland
+DISTRO=fsl-imx-wayland MACHINE=imx8mp-lpddr4-evk source imx-setup-release.sh -b build-wayland
 bitbake imx-image-full -c populate_sdk -k
 ```
 
@@ -55,3 +55,6 @@ gst-launch-1.0 -v v4l2src device=/dev/video2 io-mode=dma-buff ! queue ! waylands
 Subdev commands
 v4l2-ctl -d /dev/v4l-subdev1 -l
 v4l2-ctl -d /dev/v4l-subdev1 -c frame_rate=20
+
+useful documents:
+i.MX Graphics User's Guide
