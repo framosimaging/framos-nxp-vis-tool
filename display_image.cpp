@@ -17,7 +17,7 @@
 #include <fnmatch.h>
 #include <linux/videodev2.h>
 #include <cstring>
-#include <arm_neon.h>
+
 #include <cstdint>
 #include <cstring>
 #include <linux/dma-heap.h>
@@ -30,33 +30,11 @@
 #define BUF_COUNT 3
 std::atomic<bool> streamActive(true);
 
-// Function to allocate DMA-HEAP buffers
-int allocate_dma_heap_buffer(size_t size) {
-    // Open the DMA-HEAP system allocator
-    int heap_fd = open("/dev/dma_heap/linux,cma", O_RDWR);
-    if (heap_fd < 0) {
-        perror("Failed to open DMA heap");
-        return -1;
-    }
-
-    struct dma_heap_allocation_data alloc_data = {0};
-    alloc_data.len = size;
-    alloc_data.fd_flags = O_CLOEXEC | O_RDWR;
-
-    // Allocate the buffer
-    if (ioctl(heap_fd, DMA_HEAP_IOCTL_ALLOC, &alloc_data) < 0) {
-        perror("Failed to allocate DMA buffer");
-        close(heap_fd);
-        return -1;
-    }
-
-    close(heap_fd);
-    return alloc_data.fd;  // Return DMA-BUF FD
-}
-
 bool xioctl(int fd, unsigned long request, void* arg);
 // void DrawFps(cv::Mat &mat, uint32_t displayFps);
 
+/*
+Neon copy
 void simd_memcpy(uint8_t* dst, const uint8_t* src, size_t size) {
     size_t i = 0;
 
@@ -71,6 +49,7 @@ void simd_memcpy(uint8_t* dst, const uint8_t* src, size_t size) {
         std::memcpy(dst + i, src + i, size - i);
     }
 }
+*/
 
 enum BitWidth {
   EightBits = 8,
@@ -229,6 +208,29 @@ static int DequeueBuffers(int fd, v4l2_buffer *buf, bool dma_mem) {
     }
     return 0;
 }
+// Function to allocate DMA-HEAP buffers
+int allocate_dma_heap_buffer(size_t size) {
+    // Open the DMA-HEAP system allocator
+    int heap_fd = open("/dev/dma_heap/linux,cma", O_RDWR);
+    if (heap_fd < 0) {
+        perror("Failed to open DMA heap");
+        return -1;
+    }
+
+    struct dma_heap_allocation_data alloc_data = {0};
+    alloc_data.len = size;
+    alloc_data.fd_flags = O_CLOEXEC | O_RDWR;
+
+    // Allocate the buffer
+    if (ioctl(heap_fd, DMA_HEAP_IOCTL_ALLOC, &alloc_data) < 0) {
+        perror("Failed to allocate DMA buffer");
+        close(heap_fd);
+        return -1;
+    }
+
+    close(heap_fd);
+    return alloc_data.fd;  // Return DMA-BUF FD
+}
 
 void *dma_buf_map(int dma_fd, size_t size) {
     void *mapped_addr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, dma_fd, 0);
@@ -266,7 +268,7 @@ void copy_dma_to_user(int dma_fd, size_t size) {
         printf("Frame data saved to frame.raw\n");
     }
     */
-    
+
     // Cleanup
     munmap(dma_ptr, size);
     free(user_buf);
@@ -282,7 +284,6 @@ static void print_profile_time(struct ProfileApp *profile_time, int visualize_nu
     std::cout << "Draw fps time: " << profile_time->draw_fps / visualize_num << " ms" << std::endl;
     std::cout << "Show image time: " << profile_time->show / visualize_num << " ms" << std::endl;
     std::cout << "Queue buffer time: " << profile_time->queue / visualize_num << " ms " << std::endl;
-
 
     profile_time->deque = 0;
     profile_time->copy_buffer = 0;
@@ -362,10 +363,6 @@ int main(int argc, char **argv) {
         return -1;
     }
     /
-    
-
-
-
     // update controls given by command line
     /*
     queryControls(subd);
@@ -391,6 +388,10 @@ int main(int argc, char **argv) {
         std::cerr << "Requesting Buffers failed" << std::endl;
         return ret;
     }
+    //struct buffer buffers[BUFFER_COUNT];
+    // for nv12 format buffer size is width * heigt * 3 / 2 
+    // int buffer_size = 1920 * 1080 + 1920 * 540
+    int buffer_size = 1920 * 1080 + 1920 * 540;
 
     // Init MMAP
     if (dma_mem) { 
@@ -405,9 +406,9 @@ int main(int argc, char **argv) {
 		}
 		int dmafd = expbuf.fd;
 		*/
+		// TODO change to 4
 		int BUFFER_COUNT = 1;
-	    	//struct buffer buffers[BUFFER_COUNT];
-    		int buffer_size = 1920 * 1080 * 2;
+
 
 		for (int i = 0; i < BUFFER_COUNT; i++) {
 			dma_fd = allocate_dma_heap_buffer(buffer_size);
@@ -417,7 +418,7 @@ int main(int argc, char **argv) {
 				close(fd);
 			return EXIT_FAILURE;
 			}
-
+		std::cout << "Queing buffers " << std::endl;
 		struct v4l2_buffer buf {0};
 		buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 		buf.index = 0;
@@ -431,21 +432,6 @@ int main(int argc, char **argv) {
             		return EXIT_FAILURE;
         	}
 		
-		/*struct v4l2_buffer buf {};
-		buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-		buf.memory = V4L2_MEMORY_DMABUF; // V4L2_MEMORY_DMABUF 
-		buf.index = 0;
-		// buf.memory = V4L2_MEMORY_DMABUF;  //V4L2_MEMORY_MMAP; 
-		//buf.memory = V4L2_MEMORY_DMABUF;
-		*/
-		/*
-		std::cout << "Querying buffers " << std::endl;
-		bool success = xioctl(fd, VIDIOC_QUERYBUF, &buf);
-		if(!success) {
-			std::cout << "VIDIOC_QUERYBUF failed" << strerror(errno) << std::endl;
-			return 1;
-		}
-		*/
 		/*
 		std::cout << "Queing buffers " << std::endl;
 		ret = QueueBuffers(fd, 1, dma_mem, dma_fd);
@@ -551,7 +537,7 @@ int main(int argc, char **argv) {
 	
 	tic = std::chrono::high_resolution_clock::now();
 	// ::memcpy(&output[0], &buffers[buf.index].rawData[0], pix_fmt.sizeimage);
-	copy_dma_to_user(buf.m.fd, 1920* 1080 * 2);
+	copy_dma_to_user(buf.m.fd, buffer_size);
 	toc = std::chrono::high_resolution_clock::now();
 	profile_time.copy_buffer += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
 	
