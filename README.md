@@ -28,17 +28,18 @@ source /opt/fsl-imx-full-wayland/6.6-nanbield/environment-setup-armv8a-poky-linu
 $CXX display_image.cpp -o display_image $(pkg-config --cflags --libs opencv4)
 ```
 
-Copy the `display_image` to target. When prompted copy libraries `libopencv_ts*` and `libopencv_superres*` from toolchain path on host (`/opt/fsl-imx-full-wayland/6.6-nanbield/sysroots/cortexa53-crypto-poky-linux/usr/lib/`)  libraries to `/usr/lib` on target. Also you will need to flash full image (`imx-image-multimedia-imx8mpevk.wic`).
+Copy the `display_image` to target. When prompted copy libraries `libopencv_ts*` and `libopencv_superres*` from toolchain path on host (`/opt/fsl-imx-full-wayland/6.6-nanbield/sysroots/cortexa53-crypto-poky-linux/usr/lib/`)  libraries to `/usr/lib` on target. Also you will need to flash full image (`imx-image-full-imx8mpevk.wic`).
 
 ## Streaming 
 
 ``` bash
-`./display_image -p 1 -m 1`
+./display_image -p 1 -m 1
 ```
 
 -p 1 is for profiling, -m is for choosing of memory (1 for dma).
 
 ## Tools
+
 Change code to save image frame.raw.
 Using analyze_raw.py to transform the image.
 
@@ -49,8 +50,11 @@ Files with examples
 ~/isp-imx-4.2.2.24.1/appshell/v4l_drm_test/video_test.cpp (file with example how to use dma memory for gpu)
 
 Useful commands
-gst-launch-1.0 -v v4l2src device=/dev/video2 io-mode=mmap ! queue ! Waylandsink
+
+``` bash
+gst-launch-1.0 -v v4l2src device=/dev/video2 io-mode=mmap ! queue ! waylandsink
 gst-launch-1.0 -v v4l2src device=/dev/video2 io-mode=dma-buff ! queue ! waylandsink
+```
 
 Subdev commands
 v4l2-ctl -d /dev/v4l-subdev1 -l

@@ -1,3 +1,5 @@
+//#define IMX_G2D 0
+//#define USE_OPENCV 1
 #include "CLI11/CLI11.hpp"
 #include "controls.hpp"
 
@@ -22,34 +24,23 @@
 #include <cstring>
 #include <linux/dma-heap.h>
 
-/*
-#include <opencv2/highgui.hpp>
-#include <opencv2/imgproc/imgproc.hpp>
-#include <opencv2/imgcodecs/imgcodecs.hpp>
-*/
+#ifdef IMX_G2D
+	#include <imx/linux/dma-buf.h>
+	#include <g2d.h>
+	#include <g2dExt.h>
+#endif
+#ifdef USE_OPENCV
+	#include <opencv2/highgui.hpp>
+	#include <opencv2/imgproc/imgproc.hpp>
+	#include <opencv2/imgcodecs/imgcodecs.hpp>
+#endif
 #define BUF_COUNT 3
 std::atomic<bool> streamActive(true);
 
 bool xioctl(int fd, unsigned long request, void* arg);
-// void DrawFps(cv::Mat &mat, uint32_t displayFps);
-
-/*
-Neon copy
-void simd_memcpy(uint8_t* dst, const uint8_t* src, size_t size) {
-    size_t i = 0;
-
-    // Process 128 bits (16 bytes) at a time
-    for (; i + 16 <= size; i += 16) {
-        uint8x16_t data = vld1q_u8(src + i);   // Load 16 bytes
-        vst1q_u8(dst + i, data);               // Store 16 bytes
-    }
-
-    // Copy the remaining bytes
-    if (i < size) {
-        std::memcpy(dst + i, src + i, size - i);
-    }
-}
-*/
+#ifdef USE_OPENCV
+	void DrawFps(cv::Mat &mat, uint32_t displayFps);
+#endif
 
 enum BitWidth {
   EightBits = 8,
@@ -95,7 +86,12 @@ struct Buffer {
     uint32_t index = 0;
 };
 
-static int ParseArguments(int argc, char **argv, CameraConfiguration *cam_conf, bool* profile, bool* dma_mem) {
+struct DMABuffer {
+    int dma_fd;
+    size_t size;
+};
+
+static int ParseArguments(int argc, char **argv, CameraConfiguration *cam_conf, bool* profile, int* dma_mem) {
     CLI::App app{"Display Image Example CLI"};
 
     // app.add_option("-d,--device", camera, "Device to stream from")->required();
@@ -103,7 +99,7 @@ static int ParseArguments(int argc, char **argv, CameraConfiguration *cam_conf, 
     app.add_option("-r,--resolution", cam_conf->resolution, "Image resolution, default is -r 1920 1080");
     app.add_option("-b,--bit-width", cam_conf->bit_width, "Bit width 8, 10, 12, default -b 10");
     app.add_option("-p,--profile", *profile, "add this flag -p true to profile app");
-    app.add_option("-m,--dma-mem", *dma_mem, "add this flag -p true to profile app");
+    app.add_option("-m,--dma-mem", *dma_mem, "add this flag -m for choosing memory type 0 - mmap, 1 - cma, 2 dma-gpu");
     for (auto &control : controls) {
         app.add_option(control.second.cliName, control.second.value, control.second.helpExplanation);
     }
@@ -120,9 +116,7 @@ static int ParseArguments(int argc, char **argv, CameraConfiguration *cam_conf, 
     return 1;
 }
 
-
 // other fields are set in driver
-
 static int SetFormat(int fd, CameraConfiguration cam_conf, v4l2_format *format) {
     format->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     format->fmt.pix.pixelformat = bits_to_pixel_fmt.at(cam_conf.bit_width);
@@ -131,40 +125,35 @@ static int SetFormat(int fd, CameraConfiguration cam_conf, v4l2_format *format) 
 
     std::cout << " VIDIOC_S_FMT " << format->fmt.pix.width <<  format->fmt.pix.height << std::endl;
     if (xioctl(fd, VIDIOC_S_FMT, format) < 0) {
-        // printf("VIDIOC_S_FMT SOME ERROR: %s", strerror(errno));
+        std::cerr << "Format set error " << std::endl;
         return -1;
     }
-
     return 0;
 }
 
-static int RequestBuffers(int fd, struct v4l2_requestbuffers *req, bool dma_mem) {
-    bool success;
-    if (dma_mem)
-    	req->count = 1;
-    else
-    	req->count = BUF_COUNT;
+static int RequestBuffers(int fd, struct v4l2_requestbuffers *req, int dma_mem) {
+    req->count = BUF_COUNT;
     req->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    if (dma_mem)
+    if (dma_mem == 1)
     	req->memory = V4L2_MEMORY_DMABUF;
     else
         req->memory = V4L2_MEMORY_MMAP;
  
-    success = xioctl(fd, VIDIOC_REQBUFS, req);
+    bool success = xioctl(fd, VIDIOC_REQBUFS, req);
     if (!success) {
-        std::cout << "Requesting Buffer failed" << std::endl;
+        std::cerr << "Requesting Buffer failed" << std::endl;
         return 1;
     }
     if (req->count < 1) {
-        std::cout << "Insufficient buffer memory" << std::endl;
+        std::cerr << "Insufficient buffer memory" << std::endl;
         return 1;
     }
     return 0;
 }
 
-static int QueueBuffers(int fd, int buf_size, bool dma_mem, int dma_fd) {
+static int QueueBuffers(int fd, int buf_size, int dma_mem, int dma_fd) {
     bool success;
-    if (dma_mem) {
+    if (dma_mem == 1) {
 		struct v4l2_buffer buf {};
 		buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 		buf.memory = V4L2_MEMORY_DMABUF;
@@ -192,10 +181,10 @@ static int QueueBuffers(int fd, int buf_size, bool dma_mem, int dma_fd) {
     return 0;
 }
 
-static int DequeueBuffers(int fd, v4l2_buffer *buf, bool dma_mem) {
+static int DequeueBuffers(int fd, v4l2_buffer *buf, int dma_mem) {
     bool success;
     buf->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    if (dma_mem) {
+    if (dma_mem == 1) {
     	buf->memory = V4L2_MEMORY_DMABUF;
     }
     else 
@@ -241,7 +230,7 @@ void *dma_buf_map(int dma_fd, size_t size) {
     return mapped_addr;
 }
 
-void copy_dma_to_user(int dma_fd, size_t size) {
+void copy_dma_to_user(int dma_fd, size_t size, void** user_buf) {
     // Map DMA buffer
     void *dma_ptr = dma_buf_map(dma_fd, size);
     if (!dma_ptr) {
@@ -249,15 +238,10 @@ void copy_dma_to_user(int dma_fd, size_t size) {
     }
 
     // Allocate user-space buffer
-    void *user_buf = malloc(size);
-    if (!user_buf) {
-        perror("Failed to allocate user buffer");
-        munmap(dma_ptr, size);
-        return;
-    }
+
 
     // Copy data from DMA buffer to user buffer
-    memcpy(user_buf, dma_ptr, size);
+    memcpy(*user_buf, dma_ptr, size);
 
     // Example: Save to a file (optional)
     /*
@@ -271,7 +255,7 @@ void copy_dma_to_user(int dma_fd, size_t size) {
 
     // Cleanup
     munmap(dma_ptr, size);
-    free(user_buf);
+
 }
 
 static void print_profile_time(struct ProfileApp *profile_time, int visualize_num) {
@@ -333,8 +317,15 @@ int main(int argc, char **argv) {
     std::vector<Buffer> buffers;
     int saveIm = 0;
     bool profile = false;
-    bool dma_mem = false;
+    int dma_mem = 0;
     CameraConfiguration cam_conf;
+
+#ifdef IMX_G2D
+    std::cout << "USing gpu dma buffer " << std::endl;
+    //struct dma_buf_phys buf_addrs(3);
+    struct dma_buf_phys buf_addrs[BUF_COUNT];
+    memset(&buf_addrs, 0, sizeof(buf_addrs));
+#endif
 
     int ret = ParseArguments(argc, argv, &cam_conf, &profile, &dma_mem);
     if (ret < 1) {
@@ -388,14 +379,19 @@ int main(int argc, char **argv) {
         std::cerr << "Requesting Buffers failed" << std::endl;
         return ret;
     }
-    //struct buffer buffers[BUFFER_COUNT];
+    //struct buffer buffers[BUF_COUNT];
     // for nv12 format buffer size is width * heigt * 3 / 2 
     // int buffer_size = 1920 * 1080 + 1920 * 540
     int buffer_size = 1920 * 1080 + 1920 * 540;
+    void *user_buf = malloc(buffer_size);
+    if (!user_buf) {
+	std::cerr << "Failed to allocate user buffer" << std::endl;
+        return 1;
+    }
 
     // Init MMAP
-    if (dma_mem) { 
-		/*
+    if (dma_mem == 2) {
+			/*
 		struct v4l2_exportbuffer expbuf;
 		memset(&expbuf, 0, sizeof(expbuf));
 		expbuf.type = V4L2_MEMORY_DMABUF;
@@ -407,30 +403,33 @@ int main(int argc, char **argv) {
 		int dmafd = expbuf.fd;
 		*/
 		// TODO change to 4
-		int BUFFER_COUNT = 1;
-
-
-		for (int i = 0; i < BUFFER_COUNT; i++) {
-			dma_fd = allocate_dma_heap_buffer(buffer_size);
-
+		std::cerr << "Wrong memory number" << std::endl;
+    }
+    if (dma_mem == 1) { 
+		std::cout << "Allocating and Queing buffers " << std::endl;
+		std::vector<DMABuffer> buffers(BUF_COUNT);
+		for (int i = 0; i < BUF_COUNT; i++) {
+			buffers[i].dma_fd = allocate_dma_heap_buffer(buffer_size);
 			if (dma_fd < 0) {
-				fprintf(stderr, "Failed to allocate DMA buffer %d\n", i);
+				std::cerr << "Failed to allocate DMA buffer " << i << "\n";
 				close(fd);
-			return EXIT_FAILURE;
+				return EXIT_FAILURE;
 			}
-		std::cout << "Queing buffers " << std::endl;
-		struct v4l2_buffer buf {0};
-		buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-		buf.index = 0;
-		buf.memory = V4L2_MEMORY_DMABUF;
-		buf.m.fd = dma_fd;
-		std::cout << "Queing buffers " << std::endl;
-		if (ioctl(fd, VIDIOC_QBUF, &buf) < 0) {
-			perror("Failed to queue DMA buffer");
-			close(dma_fd);
-			close(fd);
-            		return EXIT_FAILURE;
-        	}
+
+			std::cout << "Queing buffers " << std::endl;
+			struct v4l2_buffer buf {0};
+			buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+			buf.index = i;
+			buf.memory = V4L2_MEMORY_DMABUF;
+			buf.m.fd = buffers[i].dma_fd;
+
+			if (ioctl(fd, VIDIOC_QBUF, &buf) < 0) {
+				perror("Failed to queue DMA buffer");
+				close(dma_fd);
+				close(fd);
+				return EXIT_FAILURE;
+			}
+		}
 		
 		/*
 		std::cout << "Queing buffers " << std::endl;
@@ -439,10 +438,8 @@ int main(int argc, char **argv) {
         		std::cerr << "Queueing Buffers failed" << strerror(errno) <<  std::endl;
         		return ret;
 		*/
-    	}
-    }
-    else {
-	for (uint32_t i = 0; i < req.count; i++){
+    } else {
+	for (uint32_t i = 0; i < req.count; i++) {
 		struct v4l2_buffer buf {};
 		buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 		buf.memory = V4L2_MEMORY_MMAP; // V4L2_MEMORY_DMABUF 
@@ -468,7 +465,26 @@ int main(int argc, char **argv) {
 		buffer.rawLength = pix_fmt.sizeimage;
 		buffer.rawData = (uint8_t *)buffer_start;
 		buffers.push_back(buffer);
-	}
+	
+	#ifdef IMX_G2D
+		struct v4l2_exportbuffer expbuf;
+		memset(&expbuf, 0, sizeof(expbuf));
+		expbuf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+		expbuf.index = i;
+		if (ioctl(fd, VIDIOC_EXPBUF, &expbuf) < 0) {
+			std::cerr << "VIDIOC_EXPBUF" << strerror(errno) <<  std::endl;
+			return -1;
+		}
+		int v4l2_dma_fd = expbuf.fd;
+		std::cout << " EXPBUFFER PLANE \n" << expbuf.plane << std::endl;
+		std::cout << " EXPBUFFER FLAGS \n" << expbuf.flags << std::endl;
+		std::cout << " EXPBUFFER FD \n" << expbuf.fd << std::endl;
+	        if (ioctl(expbuf.fd, DMA_BUF_IOCTL_PHYS, &buf_addrs[i]) < 0) {
+			std::cerr << " EXPBUFFER DMA_BUF_IOCTL_PHYS error \n" << expbuf.fd << std::endl;
+            		return -1;
+		}
+	#endif
+        }
 	ret = QueueBuffers(fd, buffers.size(), dma_mem, 0);
     	if (ret < 0) {
         	std::cerr << "Queueing Buffers failed" << std::endl;
@@ -489,7 +505,9 @@ int main(int argc, char **argv) {
     std::chrono::time_point<std::chrono::high_resolution_clock> tic, toc;
     const uint32_t visualize_num = 100, one_sec = 1000;
     auto ts_loop = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-    //cv::Mat image, image8U, res_image;
+    #ifdef USE_OPENCV
+    cv::Mat image, image8U, res_image;
+    #endif
     uint32_t fps = 0, count = 0, displayFps = 0;
     uint8_t *output = new uint8_t[pix_fmt.sizeimage];
     uint8_t *output2 = new uint8_t[pix_fmt.sizeimage];
@@ -537,7 +555,115 @@ int main(int argc, char **argv) {
 	
 	tic = std::chrono::high_resolution_clock::now();
 	// ::memcpy(&output[0], &buffers[buf.index].rawData[0], pix_fmt.sizeimage);
-	copy_dma_to_user(buf.m.fd, buffer_size);
+	if (dma_mem == 1) {
+		copy_dma_to_user(buf.m.fd, buffer_size, &user_buf);
+		#ifdef USE_OPENCV
+			image = cv::Mat(pix_fmt.height + pix_fmt.height / 2, pix_fmt.width, CV_8UC1, user_buf);
+			cv::cvtColor(image, res_image, cv::COLOR_YUV2BGR_NV12);
+		#endif
+    	}
+	else if (dma_mem == 0) {
+		// ::memcpy(&output[0], &buffers[buf.index].rawData[0], pix_fmt.sizeimage);
+		// pDisplay->showBufferExt((unsigned char*)vData[buffer.index], buf_addrs[buffer.index].phys, width, height, pixelFormat, buffer.length);
+		// DrmDisplay::showBufferExt(unsigned char* data, unsigned long buf_addr,int width, int height, int format, int size) {
+		#ifdef IMX_G2D
+		struct g2d_surfaceEx src, dst;
+		void *g2d_handle = NULL;
+		if (g2d_open(&g2d_handle)) {
+    			printf("g2d_open fail.\n");
+    			return -ENOTTY;
+		}
+  		memset(&src, 0, sizeof(src));
+		memset(&dst, 0, sizeof(dst));
+		
+		src.base.left = 0;
+		src.base.top = 0;
+		src.base.right = 1920;
+		src.base.bottom = 1080;
+		src.base.width = 1920;
+		src.base.height = 1080;
+		src.base.stride = 1920;
+		src.base.format = G2D_NV12;
+		src.base.planes[0] = buf_addrs[buf.index].phys;
+		src.base.planes[1] = buf_addrs[buf.index].phys + 1920 * 1080;
+		src.tiling = G2D_AMPHION_TILED;
+
+		dst.base.left = 0;
+		dst.base.top = 0;
+		dst.base.right = 1920;
+		dst.base.bottom = 1080;
+		dst.base.width = 1920;
+		dst.base.height = 1080;
+		dst.base.stride = 1920;
+		dst.base.format = G2D_NV12;
+		dst.base.planes[0] = buf_addrs[buf.index].phys;
+		dst.base.planes[1] = buf_addrs[buf.index].phys+ 1920 * 1080;
+		dst.base.format = G2D_BGRX8888;
+		dst.tiling = G2D_LINEAR;
+
+		g2d_blitEx(g2d_handle, &src, &dst);
+		g2d_finish(g2d_handle);
+
+		#endif
+	}
+		/*
+			{
+						}
+						
+
+						if (!setup)
+						{
+						if (adaptWindow(width, height) < 0)
+						{
+							return;
+						}
+						setup = true;
+						}
+
+						src.base.left = src_roi.left;
+						src.base.top = src_roi.top;
+						src.base.right = src_roi.right;
+						src.base.bottom = src_roi.bottom;
+						src.base.width = src_roi.right - src_roi.left;
+						src.base.height = src_roi.bottom - src_roi.top;
+						src.base.stride = width;
+
+						if (format == V4L2_PIX_FMT_NV12) {
+						src.base.format = G2D_NV12;
+						src.base.planes[0] = buf_addr;
+						src.base.planes[1] = buf_addr + width * height;
+						} else if (format == V4L2_PIX_FMT_NV16) {
+						src.base.format = G2D_NV16;
+						src.base.planes[0] = buf_addr;
+						src.base.planes[1] = buf_addr + width * height;
+						} else if (format == V4L2_PIX_FMT_YUYV) {
+						src.base.format = G2D_YUYV;
+						src.base.planes[0] = buf_addr;
+						} else {
+						ALOGW("Format (%x) not supported!", format);
+						return;
+						}
+						src.tiling = G2D_AMPHION_TILED;
+
+						dst.base.left = dst_roi.left;
+						dst.base.top = dst_roi.top;
+						dst.base.right = dst_roi.right;
+						dst.base.bottom = dst_roi.bottom;
+						dst.base.width = dst_roi.right - dst_roi.left;
+						dst.base.height = dst_roi.bottom - dst_roi.top;
+
+						dst.base.stride = buf->width;
+						dst.base.format = G2D_BGRA8888;
+						dst.base.planes[0] = buf->paddr;
+						dst.tiling = G2D_LINEAR;
+
+						g2d_blitEx(g2d_handle, &src, &dst);
+						g2d_finish(g2d_handle);
+
+		}*/
+
+
+
 	toc = std::chrono::high_resolution_clock::now();
 	profile_time.copy_buffer += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
 	
@@ -545,6 +671,7 @@ int main(int argc, char **argv) {
         tic = std::chrono::high_resolution_clock::now();
 	// Usage example
 	// simd_memcpy(output2, &buffers[buf.index].rawData[0], pix_fmt.sizeimage);
+
 	/*
         if (cam_conf.resize.at(0) != 0 && cam_conf.resize.at(1) != 0) {
                 cv::resize(image, res_image, cv::Size(cam_conf.resize.at(0), cam_conf.resize.at(1)), 0, 0, cv::INTER_NEAREST);
@@ -553,6 +680,7 @@ int main(int argc, char **argv) {
                 res_image = image;
         }
 	*/
+
         toc = std::chrono::high_resolution_clock::now();
         profile_time.resize += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
 
@@ -575,16 +703,18 @@ int main(int argc, char **argv) {
 	*/
 	// Print FPS on image
         tic = std::chrono::high_resolution_clock::now();
-        //DrawFps(image8U, displayFps);
+	#ifdef USE_OPENCV
+        DrawFps(res_image, displayFps);
+	#endif
         toc = std::chrono::high_resolution_clock::now();
         profile_time.draw_fps +=  std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
 
 	// show image using opencv/gtk
         tic = std::chrono::high_resolution_clock::now();
-        /*
-	cv::imshow(cam_conf.camera_id, image8U);
+        #ifdef USE_OPENCV
+	cv::imshow(cam_conf.camera_id, res_image);
         int key = cv::pollKey();
-	*/
+	#endif
         toc = std::chrono::high_resolution_clock::now();
         profile_time.show +=  std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
 
@@ -619,7 +749,7 @@ int main(int argc, char **argv) {
     if (!success) {
         std::cout << "VIDIOC_STREAMOFF failed" << std::endl;
     }
-    if (!dma_mem) {
+    if (dma_mem == 0) {
     for (uint32_t i = 0; i < BUF_COUNT; i++) {
         ::munmap(buffers[i].rawData, buffers[i].rawLength);
     }
@@ -627,6 +757,7 @@ int main(int argc, char **argv) {
     }
     ::close(subd);
     ::close(fd);
+    free(user_buf);
 
     return 0;
 }
@@ -639,7 +770,8 @@ bool xioctl(int fd, unsigned long request, void* arg) {
     }
     return retry_attempts != max_retry;
 }
-/*
+
+#ifdef USE_OPENCV
 void DrawFps(cv::Mat &mat, uint32_t displayFps)
 {
     std::string fpsText =  std::to_string(displayFps) + " fps";
@@ -681,4 +813,4 @@ void DrawFps(cv::Mat &mat, uint32_t displayFps)
         fpsThickness
     );
 }
-*/
+#endif
