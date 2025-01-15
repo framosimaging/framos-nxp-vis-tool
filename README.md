@@ -3,16 +3,17 @@
 
 ## Requirements
 
-Installed toolchain for NXP or some arm compiler for arm64
+Installed toolchain for NXP or some arm compiler for arm64 with all libraries available
 
 ## Building only streaming
 
 You need to have a compiler as one obtained from toolchain in https://github.com/framosimaging/framos-nxp-drivers 
 
+``` bash
 $CXX display_image.cpp -o display_image
-(with opencv )
+```
 
-## Building with `opencv` for visualization (not supported yet)
+### Building with `opencv` for visualization
 
 For opencv you need to install toolchain for full image
 
@@ -30,13 +31,27 @@ $CXX display_image.cpp -o display_image $(pkg-config --cflags --libs opencv4)
 
 Copy the `display_image` to target. When prompted copy libraries `libopencv_ts*` and `libopencv_superres*` from toolchain path on host (`/opt/fsl-imx-full-wayland/6.6-nanbield/sysroots/cortexa53-crypto-poky-linux/usr/lib/`)  libraries to `/usr/lib` on target. Also you will need to flash full image (`imx-image-full-imx8mpevk.wic`).
 
+## Building with dma buffers for gpu
+
+``` bash
+source /opt/fsl-imx-full-wayland/6.6-nanbield/environment-setup-armv8a-poky-linux # put your toolchain path here
+$CXX display_image.cpp -o display_image $(pkg-config --cflags --libs opencv4) -lg2d
+```
+
+Based on your installation you might need to copy the library from toolchain build
+
+``` bash
+cd ~/imx-yocto-bsp/build-wayland/tmp/work/armv8a-mx8mp-poky-linuximx-gpu-g2d/
+sudo cp -v ./6.4.11.p2.4/sysroot-destdir/usr/lib/libg2d* /opt/fsl-imx-full-wayland/6.6-nanbield/sysroots/armv8a-poky-linux/usr/lib
+```
+
 ## Streaming 
 
 ``` bash
-./display_image -p 1 -m 1
+./display_image -v 0 -m 2 -p NV12
 ```
 
--p 1 is for profiling, -m is for choosing of memory (1 for dma).
+-v 1 is for profiling, -m is for choosing of memory (0 mmap, 1 for dma, 2 dma gpu).
 
 ## Tools
 

@@ -1,5 +1,5 @@
-//#define IMX_G2D 0
-//#define USE_OPENCV 1
+#define IMX_G2D 1
+#define USE_OPENCV 1
 #include "CLI11/CLI11.hpp"
 #include "controls.hpp"
 
@@ -33,8 +33,10 @@
 	#include <opencv2/highgui.hpp>
 	#include <opencv2/imgproc/imgproc.hpp>
 	#include <opencv2/imgcodecs/imgcodecs.hpp>
+	#include <opencv2/core/ocl.hpp>
 #endif
 #define BUF_COUNT 3
+
 std::atomic<bool> streamActive(true);
 
 bool xioctl(int fd, unsigned long request, void* arg);
@@ -46,6 +48,20 @@ enum BitWidth {
   EightBits = 8,
   TenBits = 10,
   TwelveBits = 12
+};
+
+const std::map<std::string, uint32_t> abbrev_to_pixel_fmt = {
+    {"GRAY", V4L2_PIX_FMT_GREY},
+    {"Y10", V4L2_PIX_FMT_Y10},
+    {"Y12", V4L2_PIX_FMT_Y12},
+    {"YUYV", V4L2_PIX_FMT_YUYV},
+    {"NV12", V4L2_PIX_FMT_NV12},
+};
+
+//TODO: use this
+const std::map<std::string, uint8_t> abbrev_to_memory_fmt = {
+  {"mmap", V4L2_MEMORY_MMAP},
+  {"dma", V4L2_MEMORY_DMABUF},
 };
 
 const std::map<BitWidth, uint32_t> bits_to_pixel_fmt = {
@@ -73,9 +89,11 @@ struct ProfileApp {
 };
 
 struct CameraConfiguration {
-    std::string camera_id = "/dev/video2";;
-    std::vector<uint32_t> resize = {640, 360};
+    std::string camera_id = "/dev/video2";
+    std::string subdevice_id = "/dev/v4l-subdev1";
+    std::vector<uint32_t> resize = {0, 0};
     std::vector<uint32_t>  resolution = {1920, 1080};
+    std::string pixel_format;
     BitWidth bit_width = TwelveBits;
     bool profile = false;
 };
@@ -95,11 +113,16 @@ static int ParseArguments(int argc, char **argv, CameraConfiguration *cam_conf, 
     CLI::App app{"Display Image Example CLI"};
 
     // app.add_option("-d,--device", camera, "Device to stream from")->required();
-    app.add_option("--resize", cam_conf->resize, "Resize image to X Y dimension. default is --resize 640 360");
+    cam_conf->pixel_format = "NV12";
+    app.add_option("--resize", cam_conf->resize, "Resize image to X Y dimension. default is no resizing");
+    app.add_option("-p,--pixel-format", cam_conf->pixel_format, "add this flag -p NV12 to choose pixel format")
+	->check(CLI::IsMember({"NV12", "NV16", "RG10", "RG12", "RG8", "YUYV", "GRAY"}));
     app.add_option("-r,--resolution", cam_conf->resolution, "Image resolution, default is -r 1920 1080");
-    app.add_option("-b,--bit-width", cam_conf->bit_width, "Bit width 8, 10, 12, default -b 10");
-    app.add_option("-p,--profile", *profile, "add this flag -p true to profile app");
-    app.add_option("-m,--dma-mem", *dma_mem, "add this flag -m for choosing memory type 0 - mmap, 1 - cma, 2 dma-gpu");
+    app.add_option("-b,--bit-width", cam_conf->bit_width, "Bit width 8, 10, 12, default -b 12")
+    	->check(CLI::IsMember({8, 10, 12}));
+    app.add_option("-v,--verbose", *profile, "add this flag -v 1 to output profiling information");
+    app.add_option("-m,--dma-mem", *dma_mem, "add this flag -m for choosing memory type 0 - mmap, 1 - cma, 2 dma-gpu")
+    	->check(CLI::IsMember({0, 1, 2}));
     for (auto &control : controls) {
         app.add_option(control.second.cliName, control.second.value, control.second.helpExplanation);
     }
@@ -119,11 +142,13 @@ static int ParseArguments(int argc, char **argv, CameraConfiguration *cam_conf, 
 // other fields are set in driver
 static int SetFormat(int fd, CameraConfiguration cam_conf, v4l2_format *format) {
     format->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    format->fmt.pix.pixelformat = bits_to_pixel_fmt.at(cam_conf.bit_width);
+    format->fmt.pix.pixelformat = abbrev_to_pixel_fmt.at(cam_conf.pixel_format);
+    std::cout << "pixel format: " << cam_conf.pixel_format << " V4l2 PIX FMT " << format->fmt.pix.pixelformat << std::endl;
+
     format->fmt.pix.width = cam_conf.resolution.at(0);
     format->fmt.pix.height = cam_conf.resolution.at(1);
 
-    std::cout << " VIDIOC_S_FMT " << format->fmt.pix.width <<  format->fmt.pix.height << std::endl;
+    std::cout << " VIDIOC_S_FMT " << format->fmt.pix.width << " x " << format->fmt.pix.height << std::endl;
     if (xioctl(fd, VIDIOC_S_FMT, format) < 0) {
         std::cerr << "Format set error " << std::endl;
         return -1;
@@ -237,9 +262,6 @@ void copy_dma_to_user(int dma_fd, size_t size, void** user_buf) {
         return;
     }
 
-    // Allocate user-space buffer
-
-
     // Copy data from DMA buffer to user buffer
     memcpy(*user_buf, dma_ptr, size);
 
@@ -289,12 +311,16 @@ static void queryControls(int subd) {
             		controls.at(std::string((char*)queryctrl.name)).id = queryctrl.id;
             		controls.at(std::string((char*)queryctrl.name)).defaultValue = queryctrl.default_value;
 		}
+	    std::cout << "Control: " << queryctrl.name << std::endl;
+            std::cout << "  Minimum: " << queryctrl.minimum << std::endl;
+            std::cout << "  Maximum: " << queryctrl.maximum << std::endl;
+            std::cout << "  Default: " << queryctrl.default_value << std::endl;
+
     	} 
    }
 }
 
 // update v4l2-control values passed by command line
-/*
 static int updateControls(int subd) {
     for (auto &control : controls) {
 	v4l2_control controlToSet;
@@ -312,20 +338,14 @@ static int updateControls(int subd) {
     }
     return 0;
 }
-*/
+
 int main(int argc, char **argv) {
     std::vector<Buffer> buffers;
     int saveIm = 0;
     bool profile = false;
     int dma_mem = 0;
     CameraConfiguration cam_conf;
-
-#ifdef IMX_G2D
-    std::cout << "USing gpu dma buffer " << std::endl;
-    //struct dma_buf_phys buf_addrs(3);
-    struct dma_buf_phys buf_addrs[BUF_COUNT];
-    memset(&buf_addrs, 0, sizeof(buf_addrs));
-#endif
+    int dma_fd;
 
     int ret = ParseArguments(argc, argv, &cam_conf, &profile, &dma_mem);
     if (ret < 1) {
@@ -333,6 +353,15 @@ int main(int argc, char **argv) {
         return ret;
     }
     std::cout << "Using buffer type " << dma_mem << std::endl;
+    std::cout << "PIXXEL FORMAT  " << cam_conf.pixel_format << std::endl;
+
+#ifdef IMX_G2D
+    if (dma_mem == 2)
+	std::cout << "Using gpu dma buffer " << std::endl;
+
+    struct dma_buf_phys buf_addrs[BUF_COUNT];
+    memset(&buf_addrs, 0, sizeof(buf_addrs));
+#endif
 
     // Open video device
     int fd = ::open(cam_conf.camera_id.c_str(), O_RDWR);
@@ -340,29 +369,23 @@ int main(int argc, char **argv) {
         std::cerr << "Open failed" << std::endl;
         return 1;
     }
-    // Open subdevice, driver controls are passed via subdevice
-    int subd = open("/dev/v4l-subdev1", O_RDWR);
+
+    // Open subdevice for driver controls 
+
+    int subd = open(cam_conf.subdevice_id.c_str(), O_RDWR);
     if (subd < 0) {
          std::cout <<  "Failed to open subdev device" << std::endl;
         return -1;
     }
-    int dma_fd;
-    /*
-    int dma_fd = open("/dev/dma_heap/system", O_RDWR);
-    if (dma_fd < 0) {
-         std::cout <<  "Failed to open dma file descriptor" << std::endl;
-        return -1;
-    }
-    /
+
     // update controls given by command line
-    /*
+
     queryControls(subd);
     ret = updateControls(subd);
     if (ret < 0) {
 	std::cerr << "Updating controls failed" << std::endl;
         return ret;
     }
-    */
 
     struct v4l2_format format;
     ret = SetFormat(fd, cam_conf, &format);
@@ -370,75 +393,30 @@ int main(int argc, char **argv) {
         std::cerr << "Set format failed" << std::endl;
         return ret;
     }
+
     v4l2_pix_format pix_fmt = format.fmt.pix;
+    size_t buffer_size = pix_fmt.sizeimage;
+
+    void *user_buf = malloc(pix_fmt.sizeimage);
+    if (!user_buf) {
+	std::cerr << "Failed to allocate user buffer" << std::endl;
+        return 1;
+    }
+    void* temp_buffer =   malloc(1920 * 1080 * 4);
+
 
     struct v4l2_requestbuffers req {};
     std::cout << "Requesting Buffers " << std::endl;
+
     ret = RequestBuffers(fd, &req, dma_mem);
     if (ret < 0) {
         std::cerr << "Requesting Buffers failed" << std::endl;
         return ret;
     }
-    //struct buffer buffers[BUF_COUNT];
-    // for nv12 format buffer size is width * heigt * 3 / 2 
-    // int buffer_size = 1920 * 1080 + 1920 * 540
-    int buffer_size = 1920 * 1080 + 1920 * 540;
-    void *user_buf = malloc(buffer_size);
-    if (!user_buf) {
-	std::cerr << "Failed to allocate user buffer" << std::endl;
-        return 1;
-    }
+
 
     // Init MMAP
     if (dma_mem == 2) {
-			/*
-		struct v4l2_exportbuffer expbuf;
-		memset(&expbuf, 0, sizeof(expbuf));
-		expbuf.type = V4L2_MEMORY_DMABUF;
-		expbuf.index = 0;
-		if (ioctl(fd, VIDIOC_EXPBUF, &expbuf) == -1) {
-			perror("VIDIOC_EXPBUF");
-			return -1;
-		}
-		int dmafd = expbuf.fd;
-		*/
-		// TODO change to 4
-		std::cerr << "Wrong memory number" << std::endl;
-    }
-    if (dma_mem == 1) { 
-		std::cout << "Allocating and Queing buffers " << std::endl;
-		std::vector<DMABuffer> buffers(BUF_COUNT);
-		for (int i = 0; i < BUF_COUNT; i++) {
-			buffers[i].dma_fd = allocate_dma_heap_buffer(buffer_size);
-			if (dma_fd < 0) {
-				std::cerr << "Failed to allocate DMA buffer " << i << "\n";
-				close(fd);
-				return EXIT_FAILURE;
-			}
-
-			std::cout << "Queing buffers " << std::endl;
-			struct v4l2_buffer buf {0};
-			buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-			buf.index = i;
-			buf.memory = V4L2_MEMORY_DMABUF;
-			buf.m.fd = buffers[i].dma_fd;
-
-			if (ioctl(fd, VIDIOC_QBUF, &buf) < 0) {
-				perror("Failed to queue DMA buffer");
-				close(dma_fd);
-				close(fd);
-				return EXIT_FAILURE;
-			}
-		}
-		
-		/*
-		std::cout << "Queing buffers " << std::endl;
-		ret = QueueBuffers(fd, 1, dma_mem, dma_fd);
-    		if (ret < 0) {
-        		std::cerr << "Queueing Buffers failed" << strerror(errno) <<  std::endl;
-        		return ret;
-		*/
-    } else {
 	for (uint32_t i = 0; i < req.count; i++) {
 		struct v4l2_buffer buf {};
 		buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -483,6 +461,7 @@ int main(int argc, char **argv) {
 			std::cerr << " EXPBUFFER DMA_BUF_IOCTL_PHYS error \n" << expbuf.fd << std::endl;
             		return -1;
 		}
+
 	#endif
         }
 	ret = QueueBuffers(fd, buffers.size(), dma_mem, 0);
@@ -491,7 +470,79 @@ int main(int argc, char **argv) {
         	return ret;
     	}
     }
+    else if (dma_mem == 1) { 
+		std::cout << "Allocating and Queing buffers " << std::endl;
+		std::vector<DMABuffer> buffers(BUF_COUNT);
+		for (int i = 0; i < BUF_COUNT; i++) {
+			buffers[i].dma_fd = allocate_dma_heap_buffer(buffer_size);
+			if (dma_fd < 0) {
+				std::cerr << "Failed to allocate DMA buffer " << i << "\n";
+				close(fd);
+				return EXIT_FAILURE;
+			}
 
+			std::cout << "Queing buffers " << std::endl;
+			struct v4l2_buffer buf {0};
+			buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+			buf.index = i;
+			buf.memory = V4L2_MEMORY_DMABUF;
+			buf.m.fd = buffers[i].dma_fd;
+
+			if (ioctl(fd, VIDIOC_QBUF, &buf) < 0) {
+				perror("Failed to queue DMA buffer");
+				close(dma_fd);
+				close(fd);
+				return EXIT_FAILURE;
+			}
+		}
+		
+		/*
+		std::cout << "Queing buffers " << std::endl;
+		ret = QueueBuffers(fd, 1, dma_mem, dma_fd);
+    		if (ret < 0) {
+        		std::cerr << "Queueing Buffers failed" << strerror(errno) <<  std::endl;
+        		return ret;
+		*/
+    } else if (dma_mem == 0) {
+	for (uint32_t i = 0; i < req.count; i++) {
+		struct v4l2_buffer buf {};
+		buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+		buf.memory = V4L2_MEMORY_MMAP; // V4L2_MEMORY_DMABUF 
+		buf.index = i;
+		bool success = xioctl(fd, VIDIOC_QUERYBUF, &buf);
+		if(!success) {
+		std::cout << "VIDIOC_QUERYBUF failed" << std::endl;
+		return 1;
+		}
+		void *buffer_start = ::mmap (NULL, 
+		pix_fmt.sizeimage, 
+		PROT_READ | PROT_WRITE, 
+		MAP_SHARED, 
+		fd, 
+		buf.m.offset);
+		if (buffer_start == nullptr) {
+		std::cout << "mmap failed" << std::endl;
+		return 1;
+		}
+		std::memset(buffer_start, 0, pix_fmt.sizeimage);
+		Buffer buffer;
+		buffer.index = buf.index;
+		buffer.rawLength = pix_fmt.sizeimage;
+		buffer.rawData = (uint8_t *)buffer_start;
+		buffers.push_back(buffer);
+	}
+	ret = QueueBuffers(fd, buffers.size(), dma_mem, 0);
+    	if (ret < 0) {
+        	std::cerr << "Queueing Buffers failed" << std::endl;
+        	return ret;
+    	}
+	}
+
+
+
+
+
+    std::cout << "Start streaming" << std::endl;
     enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     bool success = xioctl(fd, VIDIOC_STREAMON, &type);
     if (!success) {
@@ -510,7 +561,18 @@ int main(int argc, char **argv) {
     #endif
     uint32_t fps = 0, count = 0, displayFps = 0;
     uint8_t *output = new uint8_t[pix_fmt.sizeimage];
-    uint8_t *output2 = new uint8_t[pix_fmt.sizeimage];
+
+    void *g2d_handle = NULL;
+    if (g2d_open(&g2d_handle)) {
+	printf("g2d_open fail.\n");
+	return -ENOTTY;
+    }
+    struct g2d_surfaceEx src, dst;
+    struct g2d_buf *d_buf;
+    int w = 1280;
+    int h = 720;
+    d_buf = g2d_alloc(w * h * 4, 2);
+
     while (streamActive) {
         struct v4l2_buffer buf {};
         count += 1;
@@ -552,34 +614,25 @@ int main(int argc, char **argv) {
 
 	*/
 	// Copy data from ISP to userspace and measure transfer time
-	
 	tic = std::chrono::high_resolution_clock::now();
+	
 	// ::memcpy(&output[0], &buffers[buf.index].rawData[0], pix_fmt.sizeimage);
-	if (dma_mem == 1) {
-		copy_dma_to_user(buf.m.fd, buffer_size, &user_buf);
-		#ifdef USE_OPENCV
-			image = cv::Mat(pix_fmt.height + pix_fmt.height / 2, pix_fmt.width, CV_8UC1, user_buf);
-			cv::cvtColor(image, res_image, cv::COLOR_YUV2BGR_NV12);
-		#endif
-    	}
-	else if (dma_mem == 0) {
-		// ::memcpy(&output[0], &buffers[buf.index].rawData[0], pix_fmt.sizeimage);
-		// pDisplay->showBufferExt((unsigned char*)vData[buffer.index], buf_addrs[buffer.index].phys, width, height, pixelFormat, buffer.length);
-		// DrmDisplay::showBufferExt(unsigned char* data, unsigned long buf_addr,int width, int height, int format, int size) {
+	if (dma_mem == 2) {
 		#ifdef IMX_G2D
-		struct g2d_surfaceEx src, dst;
+		/*
 		void *g2d_handle = NULL;
 		if (g2d_open(&g2d_handle)) {
     			printf("g2d_open fail.\n");
     			return -ENOTTY;
 		}
+		*/
   		memset(&src, 0, sizeof(src));
 		memset(&dst, 0, sizeof(dst));
 		
 		src.base.left = 0;
 		src.base.top = 0;
-		src.base.right = 1920;
-		src.base.bottom = 1080;
+		src.base.right = w;
+		src.base.bottom = h;
 		src.base.width = 1920;
 		src.base.height = 1080;
 		src.base.stride = 1920;
@@ -590,118 +643,88 @@ int main(int argc, char **argv) {
 
 		dst.base.left = 0;
 		dst.base.top = 0;
-		dst.base.right = 1920;
-		dst.base.bottom = 1080;
-		dst.base.width = 1920;
-		dst.base.height = 1080;
-		dst.base.stride = 1920;
-		dst.base.format = G2D_NV12;
-		dst.base.planes[0] = buf_addrs[buf.index].phys;
-		dst.base.planes[1] = buf_addrs[buf.index].phys+ 1920 * 1080;
+		dst.base.right = w;
+		dst.base.bottom = h;
+		dst.base.width = w;
+		dst.base.height = h;
+		dst.base.stride = w;
+		dst.base.planes[0] = d_buf->buf_paddr; //d_buf->buf_paddr;
+		//st.base.planes[1] = buf_addrs[buf.index].phys+ 1920 * 1080;
 		dst.base.format = G2D_BGRX8888;
 		dst.tiling = G2D_LINEAR;
 
 		g2d_blitEx(g2d_handle, &src, &dst);
 		g2d_finish(g2d_handle);
 
+		
+		
+		//memcpy(temp_buffer, d_buf->buf_vaddr, w * h * 4);
+
+		//res_image = cv::Mat(h, w, CV_8UC4, temp_buffer);
+		res_image = cv::Mat(h, w, CV_8UC4, d_buf->buf_vaddr);
+		
+
 		#endif
-	}
-		/*
-			{
-						}
-						
+	} else if (dma_mem == 1) {
+		copy_dma_to_user(buf.m.fd, buffer_size, &user_buf);
+		#ifdef USE_OPENCV
+			image = cv::Mat(pix_fmt.height + pix_fmt.height / 2, pix_fmt.width, CV_8UC1, user_buf);
+			cv::cvtColor(image, res_image, cv::COLOR_YUV2BGR_NV12);
+		#endif
 
-						if (!setup)
-						{
-						if (adaptWindow(width, height) < 0)
-						{
-							return;
-						}
-						setup = true;
-						}
-
-						src.base.left = src_roi.left;
-						src.base.top = src_roi.top;
-						src.base.right = src_roi.right;
-						src.base.bottom = src_roi.bottom;
-						src.base.width = src_roi.right - src_roi.left;
-						src.base.height = src_roi.bottom - src_roi.top;
-						src.base.stride = width;
-
-						if (format == V4L2_PIX_FMT_NV12) {
-						src.base.format = G2D_NV12;
-						src.base.planes[0] = buf_addr;
-						src.base.planes[1] = buf_addr + width * height;
-						} else if (format == V4L2_PIX_FMT_NV16) {
-						src.base.format = G2D_NV16;
-						src.base.planes[0] = buf_addr;
-						src.base.planes[1] = buf_addr + width * height;
-						} else if (format == V4L2_PIX_FMT_YUYV) {
-						src.base.format = G2D_YUYV;
-						src.base.planes[0] = buf_addr;
-						} else {
-						ALOGW("Format (%x) not supported!", format);
-						return;
-						}
-						src.tiling = G2D_AMPHION_TILED;
-
-						dst.base.left = dst_roi.left;
-						dst.base.top = dst_roi.top;
-						dst.base.right = dst_roi.right;
-						dst.base.bottom = dst_roi.bottom;
-						dst.base.width = dst_roi.right - dst_roi.left;
-						dst.base.height = dst_roi.bottom - dst_roi.top;
-
-						dst.base.stride = buf->width;
-						dst.base.format = G2D_BGRA8888;
-						dst.base.planes[0] = buf->paddr;
-						dst.tiling = G2D_LINEAR;
-
-						g2d_blitEx(g2d_handle, &src, &dst);
-						g2d_finish(g2d_handle);
-
-		}*/
-
-
-
+    	}
+	else if (dma_mem == 0) {
+		//::memcpy(&output[0], &buffers[buf.index].rawData[0], pix_fmt.sizeimage);
+		image = cv::Mat(pix_fmt.height + pix_fmt.height / 2, pix_fmt.width, CV_8UC1, &buffers[buf.index].rawData[0]);
+		cv::cvtColor(image, res_image, cv::COLOR_YUV2BGR_NV12);
+		/* for mono image
+		// this is bottleneck operation, it is faster to resize first and then convert to CV_8UC1
+	        if (cam_conf.bit_width == EightBits) {
+        		image = cv::Mat(pix_fmt.height, pix_fmt.width, CV_8UC1, &buffers[buf.index].rawData[0]);
+        	} else {
+            		image = cv::Mat(pix_fmt.height, pix_fmt.width, CV_16UC1, &buffers[buf.index].rawData[0]);
+		}
+		*/
+        }
 	toc = std::chrono::high_resolution_clock::now();
 	profile_time.copy_buffer += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
-	
-	// this is bottleneck operation, it is faster to resize first and then convert to CV_8UC1
-        tic = std::chrono::high_resolution_clock::now();
+        /*
+	tic = std::chrono::high_resolution_clock::now();
 	// Usage example
 	// simd_memcpy(output2, &buffers[buf.index].rawData[0], pix_fmt.sizeimage);
-
-	/*
+	
         if (cam_conf.resize.at(0) != 0 && cam_conf.resize.at(1) != 0) {
                 cv::resize(image, res_image, cv::Size(cam_conf.resize.at(0), cam_conf.resize.at(1)), 0, 0, cv::INTER_NEAREST);
         }
         else {
                 res_image = image;
         }
-	*/
 
         toc = std::chrono::high_resolution_clock::now();
         profile_time.resize += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
+	*/
 
 	// opencv does not support visualizing CV_16UC1 images, so one must convert it here to add proper shift for RAW10 and RAW12
 	// otherwise, opencv will make shift for RAW16
-        tic = std::chrono::high_resolution_clock::now();
 	/*
+        tic = std::chrono::high_resolution_clock::now();
+
         if (cam_conf.bit_width != EightBits){
                 res_image.convertTo(image8U, CV_8UC1, 1. / conversion_factor.at(cam_conf.bit_width));
         } else {
 		image8U = res_image;
 	}
-	*/
+
         toc = std::chrono::high_resolution_clock::now();
         profile_time.visualize += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
+	*/
 	/*
         if (image8U.empty()) {
                 std::cerr << "The image is empty." << std::endl;
         }
 	*/
 	// Print FPS on image
+
         tic = std::chrono::high_resolution_clock::now();
 	#ifdef USE_OPENCV
         DrawFps(res_image, displayFps);
@@ -713,6 +736,7 @@ int main(int argc, char **argv) {
         tic = std::chrono::high_resolution_clock::now();
         #ifdef USE_OPENCV
 	cv::imshow(cam_conf.camera_id, res_image);
+	//cv::imshow(cam_conf.camera_id, frame_gpu);
         int key = cv::pollKey();
 	#endif
         toc = std::chrono::high_resolution_clock::now();
@@ -742,7 +766,8 @@ int main(int argc, char **argv) {
             saveIm = 0;
         }
     }
-
+    g2d_close(g2d_handle);
+    
     // Close buffers
     type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     success = xioctl(fd, VIDIOC_STREAMOFF, &type);
@@ -758,6 +783,7 @@ int main(int argc, char **argv) {
     ::close(subd);
     ::close(fd);
     free(user_buf);
+    free(temp_buffer);
 
     return 0;
 }
