@@ -3,27 +3,7 @@
 
 ## Requirements
 
-Installed toolchain for NXP or some arm compiler for arm64 with all libraries available, install cmake (tested on version 3.27.5).
-
-## Building
-
-Go to project directory and run
-
-```bash
-mkdir build
-cd build
-cmake ..
-cmake --build .
-```
-
-the display_image application is located at `$REPO/build/display_image`. Copy the application to NXP platform and run it with.
-For rebuilding the repo run:
-
-```bash
-cmake --build . --target clean
-cmake ..
-cmake --build .
-```
+Installed toolchain for NXP or some arm compiler for arm64 with all libraries available
 
 ## Building only streaming
 
@@ -65,28 +45,13 @@ cd ~/imx-yocto-bsp/build-wayland/tmp/work/armv8a-mx8mp-poky-linuximx-gpu-g2d/
 sudo cp -v ./6.4.11.p2.4/sysroot-destdir/usr/lib/libg2d* /opt/fsl-imx-full-wayland/6.6-nanbield/sysroots/armv8a-poky-linux/usr/lib
 ```
 
-## Streaming configuration
+## Streaming 
 
 ``` bash
-./display_image -c config.json -m 2
-```
--m is for choosing of memory (0 mmap, 1 for dma, 2 dma gpu).
-The configuration is set using json file.
-
-### V4l2 controls
-
-To use subdevice controls (V4L2_CID controls defined in imx<ID>_mipi.c) driver you can set the values in this way. Some controls are not supported as Vivante controls (frame rate and data rate for instance). For other controls (exposure, gain) we recommend using Vivante controls to avoid confusion later.
-
-``` bash
-"v4l2_subdevice_config": {
-	"Data rate": 2,
-	"Frame rate": 50,
-	"Exposure": 10000,
-	"Gain": 10,
-}
+./display_image -v 0 -m 2 -p NV12
 ```
 
--v 1 is for profiling, 
+-v 1 is for profiling, -m is for choosing of memory (0 mmap, 1 for dma, 2 dma gpu).
 
 ## Tools
 

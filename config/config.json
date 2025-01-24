@@ -1,0 +1,13 @@
+{
+	"camera_id": "/dev/video2",
+	"subdevice_id": "/dev/v4l-subdev1",
+	"resize": [1280, 720],
+	"resolution": [1920, 1080],
+	"pixel_format": "NV12",
+	"verbose": true,
+	"v4l2_subdevice_config": {
+		"Frame rate": 50,
+		"Gain": 600,
+	},
+	"save_image": false
+}

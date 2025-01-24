@@ -1,7 +1,10 @@
 #define IMX_G2D 1
 #define USE_OPENCV 1
-#include "CLI11/CLI11.hpp"
+
+#include "CLI11.hpp"
 #include "controls.hpp"
+#include "v4l2_subdevice_controls.hpp"
+#include <nlohmann/json.hpp>
 
 #include <atomic> 
 #include <ctime>
@@ -17,12 +20,11 @@
 #include <sys/types.h>
 #include <dirent.h>
 #include <fnmatch.h>
-#include <linux/videodev2.h>
 #include <cstring>
-
 #include <cstdint>
 #include <cstring>
 #include <linux/dma-heap.h>
+#include <linux/videodev2.h>
 
 #ifdef IMX_G2D
 	#include <imx/linux/dma-buf.h>
@@ -37,6 +39,7 @@
 #endif
 #define BUF_COUNT 3
 
+using json = nlohmann::json;
 std::atomic<bool> streamActive(true);
 
 bool xioctl(int fd, unsigned long request, void* arg);
@@ -93,7 +96,8 @@ struct CameraConfiguration {
     std::string subdevice_id = "/dev/v4l-subdev1";
     std::vector<uint32_t> resize = {0, 0};
     std::vector<uint32_t>  resolution = {1920, 1080};
-    std::string pixel_format;
+    std::string pixel_format = "NV12";
+    uint16_t frame_rate = 30;
     BitWidth bit_width = TwelveBits;
     bool profile = false;
 };
@@ -109,23 +113,16 @@ struct DMABuffer {
     size_t size;
 };
 
-static int ParseArguments(int argc, char **argv, CameraConfiguration *cam_conf, bool* profile, int* dma_mem) {
+static int ParseArguments(int argc, char **argv, nlohmann::json *json_config, CameraConfiguration *cam_conf, int* dma_mem) {
     CLI::App app{"Display Image Example CLI"};
 
-    // app.add_option("-d,--device", camera, "Device to stream from")->required();
-    cam_conf->pixel_format = "NV12";
-    app.add_option("--resize", cam_conf->resize, "Resize image to X Y dimension. default is no resizing");
-    app.add_option("-p,--pixel-format", cam_conf->pixel_format, "add this flag -p NV12 to choose pixel format")
-	->check(CLI::IsMember({"NV12", "NV16", "RG10", "RG12", "RG8", "YUYV", "GRAY"}));
-    app.add_option("-r,--resolution", cam_conf->resolution, "Image resolution, default is -r 1920 1080");
+    std::string config_file="config.json";
+    json config;
     app.add_option("-b,--bit-width", cam_conf->bit_width, "Bit width 8, 10, 12, default -b 12")
     	->check(CLI::IsMember({8, 10, 12}));
-    app.add_option("-v,--verbose", *profile, "add this flag -v 1 to output profiling information");
     app.add_option("-m,--dma-mem", *dma_mem, "add this flag -m for choosing memory type 0 - mmap, 1 - cma, 2 dma-gpu")
     	->check(CLI::IsMember({0, 1, 2}));
-    for (auto &control : controls) {
-        app.add_option(control.second.cliName, control.second.value, control.second.helpExplanation);
-    }
+    app.add_option("-c,--config", config_file, "Path to JSON configuration file, default is config.json");
 
     try {
     CLI11_PARSE(app, argc, argv);
@@ -136,6 +133,36 @@ static int ParseArguments(int argc, char **argv, CameraConfiguration *cam_conf, 
         }
         return exitCode; 
     }
+
+    try {
+        std::ifstream file(config_file);
+        if (!file.is_open()) {
+            throw std::runtime_error("Could not open configuration file: " + config_file);
+        }
+        file >> config;
+	cam_conf->camera_id = config.value("camera_id", cam_conf->camera_id);
+        cam_conf->subdevice_id = config.value("subdevice_id", cam_conf->subdevice_id);
+        cam_conf->resize = config.value("resize", cam_conf->resize);
+        cam_conf->resolution = config.value("resolution", cam_conf->resolution);
+        cam_conf->pixel_format = config.value("pixel_format", "NV12");
+        cam_conf->profile = config.value("verbose", cam_conf->profile);
+    } catch (const std::exception& e) {
+        std::cerr << "Error reading configuration: " << e.what() << std::endl;
+        return 1;
+    }
+
+    // Display the configuration
+    std::cout << "Configuration loaded:\n"
+	<< "Camera ID: " << cam_conf->camera_id << "\n"
+	<< "Subdevice ID: " << cam_conf->subdevice_id << "\n"
+	<< "Resolution: " << cam_conf->resolution[0] << "x" << cam_conf->resolution[1] << "\n"
+	<< "Resize: " << cam_conf->resize[0] << "x" << cam_conf->resize[1] << "\n"
+	<< "Pixel Format: " << cam_conf->pixel_format << "\n"
+	<< "Frame rate: " << cam_conf->frame_rate << "\n"
+	//<< "Bit Width: " << (settings.bit_width == EightBits ? "8" : settings.bit_width == TenBits ? "10" : "12") << " bits\n"
+	<< "Profile: " << (cam_conf->profile ? "Enabled" : "Disabled") << std::endl;
+
+    *json_config = config;
     return 1;
 }
 
@@ -143,12 +170,12 @@ static int ParseArguments(int argc, char **argv, CameraConfiguration *cam_conf, 
 static int SetFormat(int fd, CameraConfiguration cam_conf, v4l2_format *format) {
     format->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     format->fmt.pix.pixelformat = abbrev_to_pixel_fmt.at(cam_conf.pixel_format);
-    std::cout << "pixel format: " << cam_conf.pixel_format << " V4l2 PIX FMT " << format->fmt.pix.pixelformat << std::endl;
+    std::cout << "camera configuration pixel format: " << cam_conf.pixel_format << " V4l2 PIX FMT: " << format->fmt.pix.pixelformat << std::endl;
 
     format->fmt.pix.width = cam_conf.resolution.at(0);
     format->fmt.pix.height = cam_conf.resolution.at(1);
-
     std::cout << " VIDIOC_S_FMT " << format->fmt.pix.width << " x " << format->fmt.pix.height << std::endl;
+
     if (xioctl(fd, VIDIOC_S_FMT, format) < 0) {
         std::cerr << "Format set error " << std::endl;
         return -1;
@@ -301,59 +328,40 @@ static void print_profile_time(struct ProfileApp *profile_time, int visualize_nu
     profile_time->queue = 0;
 }
 
-// find ids and values of v4lo2 controls of the subdevice
-static void queryControls(int subd) {
-    struct v4l2_queryctrl queryctrl;
-    for (queryctrl.id = V4L2_CID_BASE; queryctrl.id < V4L2_CID_USER_IMX_BASE + 16; queryctrl.id++) {
-    	if (xioctl(subd, VIDIOC_QUERYCTRL, &queryctrl) != 0) {
-		if (controls.find(std::string((char*)queryctrl.name)) != controls.end()) {
-            		controls.at(std::string((char*)queryctrl.name)).name = std::string((char*)queryctrl.name);
-            		controls.at(std::string((char*)queryctrl.name)).id = queryctrl.id;
-            		controls.at(std::string((char*)queryctrl.name)).defaultValue = queryctrl.default_value;
-		}
-	    std::cout << "Control: " << queryctrl.name << std::endl;
-            std::cout << "  Minimum: " << queryctrl.minimum << std::endl;
-            std::cout << "  Maximum: " << queryctrl.maximum << std::endl;
-            std::cout << "  Default: " << queryctrl.default_value << std::endl;
-
-    	} 
-   }
-}
-
-// update v4l2-control values passed by command line
-static int updateControls(int subd) {
-    for (auto &control : controls) {
-	v4l2_control controlToSet;
-	std::memset(&controlToSet, 0, sizeof(controlToSet));
-	controlToSet.id = control.second.id;
-	controlToSet.value = control.second.defaultValue;
-	if (control.second.value != USE_DEFAULT) {
-		controlToSet.value = control.second.value;
-	}
-	bool res = xioctl(subd, VIDIOC_S_CTRL, &controlToSet);
-	if (!res) {
-		std::cout << "Setting control failed " << std::endl;
-		return -1;
-	}
-    }
-    return 0;
-}
-
 int main(int argc, char **argv) {
     std::vector<Buffer> buffers;
-    int saveIm = 0;
-    bool profile = false;
-    int dma_mem = 0;
     CameraConfiguration cam_conf;
     int dma_fd;
+    int dma_mem = 0;
+    int save_im = 0;
+    nlohmann::json json_config;
 
-    int ret = ParseArguments(argc, argv, &cam_conf, &profile, &dma_mem);
+    int ret = ParseArguments(argc, argv, &json_config, &cam_conf, &dma_mem);
     if (ret < 1) {
-        std::cerr << "Return ret " << ret << std::endl;
+        std::cerr << "Failed to parse arguments " << ret << std::endl;
         return ret;
     }
-    std::cout << "Using buffer type " << dma_mem << std::endl;
-    std::cout << "PIXXEL FORMAT  " << cam_conf.pixel_format << std::endl;
+
+    // Open video device
+    int fd = ::open(cam_conf.camera_id.c_str(), O_RDWR);
+    if (fd == -1) {
+        std::cerr << "Open failed" << std::endl;
+        return 1;
+    }
+    
+    struct v4l2_format format;
+    ret = SetFormat(fd, cam_conf, &format);
+    if (ret < 0) {
+        std::cerr << "Set format failed" << std::endl;
+        return ret;
+    }
+
+    // Open subdevice and set v4l2 controls, if you plan to use default settings for
+    // frame rate, data rate, shutter, etc. you can remove this part
+    // For exposure and gain it is recommended to use viv controls.
+    json v4l2_controls = json_config["v4l2_subdevice_config"];
+    V4l2Subdevice v4l2_subdevice(cam_conf.subdevice_id, v4l2_controls);
+    v4l2_subdevice.run();
 
 #ifdef IMX_G2D
     if (dma_mem == 2)
@@ -363,57 +371,23 @@ int main(int argc, char **argv) {
     memset(&buf_addrs, 0, sizeof(buf_addrs));
 #endif
 
-    // Open video device
-    int fd = ::open(cam_conf.camera_id.c_str(), O_RDWR);
-    if (fd == -1) {
-        std::cerr << "Open failed" << std::endl;
-        return 1;
-    }
-
-    // Open subdevice for driver controls 
-
-    int subd = open(cam_conf.subdevice_id.c_str(), O_RDWR);
-    if (subd < 0) {
-         std::cout <<  "Failed to open subdev device" << std::endl;
-        return -1;
-    }
-
-    // update controls given by command line
-
-    queryControls(subd);
-    ret = updateControls(subd);
-    if (ret < 0) {
-	std::cerr << "Updating controls failed" << std::endl;
-        return ret;
-    }
-
-    struct v4l2_format format;
-    ret = SetFormat(fd, cam_conf, &format);
-    if (ret < 0) {
-        std::cerr << "Set format failed" << std::endl;
-        return ret;
-    }
-
     v4l2_pix_format pix_fmt = format.fmt.pix;
     size_t buffer_size = pix_fmt.sizeimage;
 
     void *user_buf = malloc(pix_fmt.sizeimage);
+    void* temp_buffer = malloc(1920 * 1080 * 4);
     if (!user_buf) {
 	std::cerr << "Failed to allocate user buffer" << std::endl;
         return 1;
     }
-    void* temp_buffer =   malloc(1920 * 1080 * 4);
-
 
     struct v4l2_requestbuffers req {};
     std::cout << "Requesting Buffers " << std::endl;
-
     ret = RequestBuffers(fd, &req, dma_mem);
     if (ret < 0) {
         std::cerr << "Requesting Buffers failed" << std::endl;
         return ret;
     }
-
 
     // Init MMAP
     if (dma_mem == 2) {
@@ -538,10 +512,6 @@ int main(int argc, char **argv) {
     	}
 	}
 
-
-
-
-
     std::cout << "Start streaming" << std::endl;
     enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     bool success = xioctl(fd, VIDIOC_STREAMON, &type);
@@ -550,7 +520,8 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    std::cout << "profiling = " << profile << std::endl;
+    std::cout << "profiling = " << cam_conf.profile << std::endl;
+    std::cout << "dma mem = " << dma_mem << std::endl;
 
     struct ProfileApp profile_time = {};
     std::chrono::time_point<std::chrono::high_resolution_clock> tic, toc;
@@ -618,7 +589,9 @@ int main(int argc, char **argv) {
 	
 	// ::memcpy(&output[0], &buffers[buf.index].rawData[0], pix_fmt.sizeimage);
 	if (dma_mem == 2) {
+		
 		#ifdef IMX_G2D
+		//std::cout << "using gpu buffer" << fps << std::endl;
 		/*
 		void *g2d_handle = NULL;
 		if (g2d_open(&g2d_handle)) {
@@ -674,6 +647,7 @@ int main(int argc, char **argv) {
 
     	}
 	else if (dma_mem == 0) {
+		std::cout << "using mmap memory" << fps << std::endl;
 		//::memcpy(&output[0], &buffers[buf.index].rawData[0], pix_fmt.sizeimage);
 		image = cv::Mat(pix_fmt.height + pix_fmt.height / 2, pix_fmt.width, CV_8UC1, &buffers[buf.index].rawData[0]);
 		cv::cvtColor(image, res_image, cv::COLOR_YUV2BGR_NV12);
@@ -752,18 +726,18 @@ int main(int argc, char **argv) {
         profile_time.queue += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
 
 	// print profiling info
-	if (profile && count == visualize_num)
+	if (cam_conf.profile && count == visualize_num)
 		print_profile_time(&profile_time, visualize_num);
 
 	if (count == visualize_num) {
 		count = 0;
 	}
 	// you can adapt this if you want to save images //cmat
-        if (saveIm) {
+        if (save_im) {
             std::string filename = "image.png";
 	    //std::vector<int> params = {cv::IMWRITE_PNG_COMPRESSION, 0};
 	    //cv::imwrite(filename, image, params);
-            saveIm = 0;
+            save_im = 0;
         }
     }
     g2d_close(g2d_handle);
@@ -780,7 +754,7 @@ int main(int argc, char **argv) {
     }
     buffers.clear();
     }
-    ::close(subd);
+    //v4
     ::close(fd);
     free(user_buf);
     free(temp_buffer);
