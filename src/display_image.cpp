@@ -1,51 +1,49 @@
 #define IMX_G2D 1
-#define USE_OPENCV 1
+//#define USE_OPENCV 1
 
 #include "CLI11.hpp"
-#include "controls.hpp"
 #include "v4l2_subdevice_controls.hpp"
-#include <nlohmann/json.hpp>
+#include "buffers.hpp"
 
-#include <atomic> 
+#include <nlohmann/json.hpp>
 #include <ctime>
+#include <cstring>
+#include <cstdint>
 #include <iostream>
 #include <unistd.h>
 #include <string>
-#include <algorithm>
+//#include <algorithm>
 #include <vector>
 #include <chrono>
 #include <fcntl.h>
 #include <sys/ioctl.h>
-#include <sys/mman.h>
+
 #include <sys/types.h>
 #include <dirent.h>
 #include <fnmatch.h>
-#include <cstring>
-#include <cstdint>
-#include <cstring>
 #include <linux/dma-heap.h>
 #include <linux/videodev2.h>
+
+#include <opencv2/highgui.hpp>
+#include <opencv2/imgproc/imgproc.hpp>
+#include <opencv2/imgcodecs/imgcodecs.hpp>
+//#include <opencv2/core/ocl.hpp>
 
 #ifdef IMX_G2D
 	#include <imx/linux/dma-buf.h>
 	#include <g2d.h>
 	#include <g2dExt.h>
 #endif
-#ifdef USE_OPENCV
-	#include <opencv2/highgui.hpp>
-	#include <opencv2/imgproc/imgproc.hpp>
-	#include <opencv2/imgcodecs/imgcodecs.hpp>
-	#include <opencv2/core/ocl.hpp>
-#endif
-#define BUF_COUNT 3
+
+
+
 
 using json = nlohmann::json;
-std::atomic<bool> streamActive(true);
+
 
 bool xioctl(int fd, unsigned long request, void* arg);
-#ifdef USE_OPENCV
-	void DrawFps(cv::Mat &mat, uint32_t displayFps);
-#endif
+void DrawFps(cv::Mat &mat, uint32_t displayFps);
+
 
 enum BitWidth {
   EightBits = 8,
@@ -102,11 +100,7 @@ struct CameraConfiguration {
     bool profile = false;
 };
 
-struct Buffer {
-    uint8_t *rawData = nullptr;
-    uint32_t rawLength = 0;
-    uint32_t index = 0;
-};
+
 
 struct DMABuffer {
     int dma_fd;
@@ -152,15 +146,15 @@ static int ParseArguments(int argc, char **argv, nlohmann::json *json_config, Ca
     }
 
     // Display the configuration
-    std::cout << "Configuration loaded:\n"
-	<< "Camera ID: " << cam_conf->camera_id << "\n"
-	<< "Subdevice ID: " << cam_conf->subdevice_id << "\n"
-	<< "Resolution: " << cam_conf->resolution[0] << "x" << cam_conf->resolution[1] << "\n"
-	<< "Resize: " << cam_conf->resize[0] << "x" << cam_conf->resize[1] << "\n"
-	<< "Pixel Format: " << cam_conf->pixel_format << "\n"
-	<< "Frame rate: " << cam_conf->frame_rate << "\n"
+    std::cout << "Configuration loaded:"
+	<< "\t Camera ID: " << cam_conf->camera_id << std::endl
+	<< "\t Subdevice ID: " << cam_conf->subdevice_id << std::endl
+	<< "\t Resolution: " << cam_conf->resolution[0] << "x" << cam_conf->resolution[1] << std::endl
+	<< "\t Resize: " << cam_conf->resize[0] << "x" << cam_conf->resize[1] << std::endl
+	<< "\t Pixel Format: " << cam_conf->pixel_format << std::endl
+	<< "\t Frame rate: " << cam_conf->frame_rate << std::endl
 	//<< "Bit Width: " << (settings.bit_width == EightBits ? "8" : settings.bit_width == TenBits ? "10" : "12") << " bits\n"
-	<< "Profile: " << (cam_conf->profile ? "Enabled" : "Disabled") << std::endl;
+	<< "\t Profile: " << (cam_conf->profile ? "Enabled" : "Disabled") << std::endl ;
 
     *json_config = config;
     return 1;
@@ -183,140 +177,16 @@ static int SetFormat(int fd, CameraConfiguration cam_conf, v4l2_format *format) 
     return 0;
 }
 
-static int RequestBuffers(int fd, struct v4l2_requestbuffers *req, int dma_mem) {
-    req->count = BUF_COUNT;
-    req->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    if (dma_mem == 1)
-    	req->memory = V4L2_MEMORY_DMABUF;
-    else
-        req->memory = V4L2_MEMORY_MMAP;
- 
-    bool success = xioctl(fd, VIDIOC_REQBUFS, req);
-    if (!success) {
-        std::cerr << "Requesting Buffer failed" << std::endl;
-        return 1;
-    }
-    if (req->count < 1) {
-        std::cerr << "Insufficient buffer memory" << std::endl;
-        return 1;
-    }
-    return 0;
-}
-
-static int QueueBuffers(int fd, int buf_size, int dma_mem, int dma_fd) {
-    bool success;
-    if (dma_mem == 1) {
-		struct v4l2_buffer buf {};
-		buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-		buf.memory = V4L2_MEMORY_DMABUF;
-		buf.index = 0;
-		buf.m.fd = dma_fd;
-		success = xioctl(fd, VIDIOC_QBUF, &buf);
-		if (!success) {
-			std::cout << "VIDIOC_QBUF failed" << strerror(errno) << std::endl;
-			return 1;
-		}
-
-    } else {
-	for (uint32_t i = 0; i < buf_size; i++){
-		struct v4l2_buffer buf {};
-		buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-		buf.memory = V4L2_MEMORY_MMAP;
-		buf.index = i;
-		success = xioctl(fd, VIDIOC_QBUF, &buf);
-		if (!success) {
-			std::cout << "VIDIOC_QBUF failed" << strerror(errno) << std::endl;
-			return 1;
-		}
-	}
-    }
-    return 0;
-}
-
-static int DequeueBuffers(int fd, v4l2_buffer *buf, int dma_mem) {
-    bool success;
-    buf->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    if (dma_mem == 1) {
-    	buf->memory = V4L2_MEMORY_DMABUF;
-    }
-    else 
-    	buf->memory = V4L2_MEMORY_MMAP;
-
-    success = xioctl(fd, VIDIOC_DQBUF, buf);
-    if (!success) {
-        std::cout << "VIDIOC_DQBUF failed" << std::endl;
-        return 1;
-    }
-    return 0;
-}
-// Function to allocate DMA-HEAP buffers
-int allocate_dma_heap_buffer(size_t size) {
-    // Open the DMA-HEAP system allocator
-    int heap_fd = open("/dev/dma_heap/linux,cma", O_RDWR);
-    if (heap_fd < 0) {
-        perror("Failed to open DMA heap");
-        return -1;
-    }
-
-    struct dma_heap_allocation_data alloc_data = {0};
-    alloc_data.len = size;
-    alloc_data.fd_flags = O_CLOEXEC | O_RDWR;
-
-    // Allocate the buffer
-    if (ioctl(heap_fd, DMA_HEAP_IOCTL_ALLOC, &alloc_data) < 0) {
-        perror("Failed to allocate DMA buffer");
-        close(heap_fd);
-        return -1;
-    }
-
-    close(heap_fd);
-    return alloc_data.fd;  // Return DMA-BUF FD
-}
-
-void *dma_buf_map(int dma_fd, size_t size) {
-    void *mapped_addr = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, dma_fd, 0);
-    if (mapped_addr == MAP_FAILED) {
-        perror("Failed to mmap DMA buffer");
-        return NULL;
-    }
-    return mapped_addr;
-}
-
-void copy_dma_to_user(int dma_fd, size_t size, void** user_buf) {
-    // Map DMA buffer
-    void *dma_ptr = dma_buf_map(dma_fd, size);
-    if (!dma_ptr) {
-        return;
-    }
-
-    // Copy data from DMA buffer to user buffer
-    memcpy(*user_buf, dma_ptr, size);
-
-    // Example: Save to a file (optional)
-    /*
-    FILE *file = fopen("frame.raw", "wb");
-    if (file) {
-        fwrite(user_buf, 1, size, file);
-        fclose(file);
-        printf("Frame data saved to frame.raw\n");
-    }
-    */
-
-    // Cleanup
-    munmap(dma_ptr, size);
-
-}
-
 static void print_profile_time(struct ProfileApp *profile_time, int visualize_num) {
     // only resize, convert, deque and show are relevent
-    std::cout << "Deque time: " << profile_time->deque / visualize_num << " ms" << std::endl;
+    //std::cout << "Deque time: " << profile_time->deque / visualize_num << " ms" << std::endl;
     std::cout << "Copy buffer time: " << profile_time->copy_buffer / visualize_num << " ms" << std::endl;
-    std::cout << "Copy buffer time: " << profile_time->copy_buffer2 / visualize_num << " ms" << std::endl;
-    std::cout << "Resize image time: " << profile_time->resize / visualize_num << " ms" << std::endl;
-    std::cout << "Convert image time: " << profile_time->visualize / visualize_num << " ms" << std::endl;
-    std::cout << "Draw fps time: " << profile_time->draw_fps / visualize_num << " ms" << std::endl;
+    
+    //std::cout << "Resize image time: " << profile_time->resize / visualize_num << " ms" << std::endl;
+    //std::cout << "Convert image time: " << profile_time->visualize / visualize_num << " ms" << std::endl;
+    //std::cout << "Draw fps time: " << profile_time->draw_fps / visualize_num << " ms" << std::endl;
     std::cout << "Show image time: " << profile_time->show / visualize_num << " ms" << std::endl;
-    std::cout << "Queue buffer time: " << profile_time->queue / visualize_num << " ms " << std::endl;
+    //std::cout << "Queue buffer time: " << profile_time->queue / visualize_num << " ms " << std::endl;
 
     profile_time->deque = 0;
     profile_time->copy_buffer = 0;
@@ -329,11 +199,9 @@ static void print_profile_time(struct ProfileApp *profile_time, int visualize_nu
 }
 
 int main(int argc, char **argv) {
-    std::vector<Buffer> buffers;
     CameraConfiguration cam_conf;
     int dma_fd;
     int dma_mem = 0;
-    int save_im = 0;
     nlohmann::json json_config;
 
     int ret = ParseArguments(argc, argv, &json_config, &cam_conf, &dma_mem);
@@ -341,7 +209,8 @@ int main(int argc, char **argv) {
         std::cerr << "Failed to parse arguments " << ret << std::endl;
         return ret;
     }
-
+    std::cout << "profiling = " << cam_conf.profile << std::endl;
+    std::cout << "dma mem = " << dma_mem << std::endl;
     // Open video device
     int fd = ::open(cam_conf.camera_id.c_str(), O_RDWR);
     if (fd == -1) {
@@ -363,6 +232,7 @@ int main(int argc, char **argv) {
     V4l2Subdevice v4l2_subdevice(cam_conf.subdevice_id, v4l2_controls);
     v4l2_subdevice.run();
 
+/*
 #ifdef IMX_G2D
     if (dma_mem == 2)
 	std::cout << "Using gpu dma buffer " << std::endl;
@@ -370,19 +240,111 @@ int main(int argc, char **argv) {
     struct dma_buf_phys buf_addrs[BUF_COUNT];
     memset(&buf_addrs, 0, sizeof(buf_addrs));
 #endif
-
+*/
     v4l2_pix_format pix_fmt = format.fmt.pix;
     size_t buffer_size = pix_fmt.sizeimage;
 
-    void *user_buf = malloc(pix_fmt.sizeimage);
-    void* temp_buffer = malloc(1920 * 1080 * 4);
-    if (!user_buf) {
+    //void *user_buf = malloc(pix_fmt.sizeimage);
+    //void* temp_buffer = malloc(1920 * 1080 * 4);
+    /*if (!user_buf) {
 	std::cerr << "Failed to allocate user buffer" << std::endl;
         return 1;
     }
+    */
 
-    struct v4l2_requestbuffers req {};
+    V4l2Buffers buffers = MMAPBuffers(fd, dma_mem, pix_fmt.sizeimage);
     std::cout << "Requesting Buffers " << std::endl;
+    ret = buffers.RequestBuffers();
+    if (!ret) {
+        std::cerr << "Requesting Buffers failed" << std::endl;
+        return 1;
+    }
+    ret = buffers.Initmmap();
+    if (!ret) {
+        std::cerr << "Initializing buffers failed" << std::endl;
+        return 1;
+    }
+    ret = buffers.QueueAllBuffers();
+    if (!ret) {
+        std::cerr << "Initializing buffers failed" << std::endl;
+        return 1;
+    }
+    ret = buffers.StartStream();
+    if (!ret) {
+        std::cerr << "Start Streaming failed" << std::endl;
+        return 1;
+    }
+    
+    cv::Mat image,frame;
+     //= cv::Mat(1080 + 1080 / 2, 1920, CV_8UC1, &output[0]);
+    std::chrono::time_point<std::chrono::high_resolution_clock> tic, toc;
+    struct ProfileApp profile_time = {};
+    uint32_t visualize_num = 100;
+    uint32_t count_frames = 0;
+    uint32_t one_sec = 1000;
+    uint32_t fps = 0;
+    auto ts_loop = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    uint8_t *image_data;
+
+    while (true) {
+	fps++;
+        if ((std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() - ts_loop) > one_sec) {
+            ts_loop = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+	    std::cout << "fps" << fps << std::endl;
+            fps = 0;
+        }
+
+	tic = std::chrono::high_resolution_clock::now();
+	ret = buffers.DequeueBuffers(&image_data);
+	frame = cv::Mat(1080 + 1080 / 2, 1920, CV_8UC1, image_data);
+	cv::cvtColor(frame, image, cv::COLOR_YUV2BGR_NV12);
+        ret |= buffers.QueueBuffers();
+        toc = std::chrono::high_resolution_clock::now();
+	if (!ret) {
+		std::cerr << "Capturing Failed" << std::endl;
+		return 1;
+	}
+	profile_time.copy_buffer += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
+
+	tic = std::chrono::high_resolution_clock::now();
+	cv::imshow("VIDEO", image);
+	int key = cv::pollKey();
+
+	toc = std::chrono::high_resolution_clock::now();
+	profile_time.show +=  std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
+	if (key == 27 || key == 'q' || key == 'Q') { // ESC key
+            std::cout << "Exiting..." << std::endl;
+            break;
+        } else if (key == 's' || key == 'S') {
+	  // Save the image to a file
+	  std::cout << "Saving image " << std::endl;
+	  std::string filename = "saved_image.jpg"; // Change the filename and format as needed
+	  if (cv::imwrite(filename, image)) {
+		std::cout << "Image saved to " << filename << std::endl;
+	  } else {
+		std::cerr << "Failed to save image!" << std::endl;
+	  }
+	}
+
+        count_frames += 1;
+	if (cam_conf.profile && count_frames == visualize_num) {
+		print_profile_time(&profile_time, visualize_num);
+		count_frames = 0;
+	};
+    }
+
+    cv::destroyAllWindows();
+    std::cout << "Stop streaming..." << std::endl;
+    buffers.StopStream();
+    std::cout << "Release buffers..." << std::endl;
+    buffers.ReleaseBuffers();
+    ::close(fd);
+    //free(user_buf);
+    //free(temp_buffer);
+
+    return 0;
+}
+    /*
     ret = RequestBuffers(fd, &req, dma_mem);
     if (ret < 0) {
         std::cerr << "Requesting Buffers failed" << std::endl;
@@ -444,7 +406,8 @@ int main(int argc, char **argv) {
         	return ret;
     	}
     }
-    else if (dma_mem == 1) { 
+    else if (
+    ) { 
 		std::cout << "Allocating and Queing buffers " << std::endl;
 		std::vector<DMABuffer> buffers(BUF_COUNT);
 		for (int i = 0; i < BUF_COUNT; i++) {
@@ -477,7 +440,7 @@ int main(int argc, char **argv) {
         		std::cerr << "Queueing Buffers failed" << strerror(errno) <<  std::endl;
         		return ret;
 		*/
-    } else if (dma_mem == 0) {
+       /* } else if (dma_mem == 0) {
 	for (uint32_t i = 0; i < req.count; i++) {
 		struct v4l2_buffer buf {};
 		buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -519,9 +482,6 @@ int main(int argc, char **argv) {
         std::cerr << "VIDIOC_STREAMON failed" << std::endl;
         return 1;
     }
-
-    std::cout << "profiling = " << cam_conf.profile << std::endl;
-    std::cout << "dma mem = " << dma_mem << std::endl;
 
     struct ProfileApp profile_time = {};
     std::chrono::time_point<std::chrono::high_resolution_clock> tic, toc;
@@ -584,10 +544,12 @@ int main(int argc, char **argv) {
         profile_time.copy_buffer += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
 
 	*/
+	/*
 	// Copy data from ISP to userspace and measure transfer time
 	tic = std::chrono::high_resolution_clock::now();
 	
 	// ::memcpy(&output[0], &buffers[buf.index].rawData[0], pix_fmt.sizeimage);
+	/*
 	if (dma_mem == 2) {
 		
 		#ifdef IMX_G2D
@@ -598,7 +560,7 @@ int main(int argc, char **argv) {
     			printf("g2d_open fail.\n");
     			return -ENOTTY;
 		}
-		*/
+		*/ /*
   		memset(&src, 0, sizeof(src));
 		memset(&dst, 0, sizeof(dst));
 		
@@ -658,7 +620,7 @@ int main(int argc, char **argv) {
         	} else {
             		image = cv::Mat(pix_fmt.height, pix_fmt.width, CV_16UC1, &buffers[buf.index].rawData[0]);
 		}
-		*/
+		*/ /*
         }
 	toc = std::chrono::high_resolution_clock::now();
 	profile_time.copy_buffer += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
@@ -698,7 +660,7 @@ int main(int argc, char **argv) {
         }
 	*/
 	// Print FPS on image
-
+        /*
         tic = std::chrono::high_resolution_clock::now();
 	#ifdef USE_OPENCV
         DrawFps(res_image, displayFps);
@@ -755,12 +717,8 @@ int main(int argc, char **argv) {
     buffers.clear();
     }
     //v4
-    ::close(fd);
-    free(user_buf);
-    free(temp_buffer);
+    */
 
-    return 0;
-}
 
 bool xioctl(int fd, unsigned long request, void* arg) {
     uint32_t retry_attempts = 0;
@@ -770,7 +728,7 @@ bool xioctl(int fd, unsigned long request, void* arg) {
     }
     return retry_attempts != max_retry;
 }
-
+/*
 #ifdef USE_OPENCV
 void DrawFps(cv::Mat &mat, uint32_t displayFps)
 {
@@ -814,3 +772,4 @@ void DrawFps(cv::Mat &mat, uint32_t displayFps)
     );
 }
 #endif
+*/

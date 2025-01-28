@@ -12,7 +12,7 @@ include_directories(include config)
 find_package(OpenCV REQUIRED)
 
 # Add the executable
-add_executable(display_image src/display_image.cpp src/v4l2_subdevice_controls.cpp)
+add_executable(display_image src/display_image.cpp src/v4l2_subdevice_controls.cpp src/buffers.cpp)
 
 # Link OpenCV libraries
 target_include_directories(display_image PRIVATE ${OpenCV_INCLUDE_DIRS})

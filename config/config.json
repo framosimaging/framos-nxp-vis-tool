@@ -7,7 +7,7 @@
 	"verbose": true,
 	"v4l2_subdevice_config": {
 		"Frame rate": 50,
-		"Gain": 600,
+		"Gain": 600
 	},
 	"save_image": false
 }
