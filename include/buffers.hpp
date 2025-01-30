@@ -10,6 +10,7 @@ struct V4l2Buffer {
     uint8_t *rawData = nullptr;
     uint32_t rawLength = 0;
     uint32_t index = 0;
+    int32_t dma_fd = -1; // file descriptor used for dma buffer
 };
 
 class V4l2Buffers {
@@ -17,9 +18,8 @@ public:
   V4l2Buffers(int32_t fd, int32_t dma_mem, uint32_t size_image);
   ~V4l2Buffers();
   std::vector<V4l2Buffer> buffers;
-
   bool RequestBuffers();
-  bool Initmmap();
+  virtual bool AllocateBuffers() = 0;
   bool QueueAllBuffers();
   bool CaptureFrame(uint8_t* output);
   bool StartStream();
@@ -28,7 +28,8 @@ public:
   void ReleaseBuffers();
   bool StopStream();
 
-private:
+protected:
+
   int32_t dma_mem_;
   enum v4l2_memory v4l2_memory_;
   int32_t fd_;
@@ -39,16 +40,15 @@ private:
   bool stream_on_ = false;
 };
 
-#endif // V4L2_BUFFERS_H
-
 class MMAPBuffers : public V4l2Buffers
 {
 public:
   MMAPBuffers(int32_t fd, int32_t dma_mem, uint32_t size_image)
     :V4l2Buffers(fd, dma_mem, size_image) {}
   
+  bool AllocateBuffers() override; // 
   ~MMAPBuffers() {}
-  bool test1;
+
 private:
   bool test2;
 };
@@ -57,11 +57,13 @@ class DMABuffers : public V4l2Buffers
 {
 public:
   DMABuffers(int32_t fd, int32_t dma_mem, uint32_t size_image)
-    :V4l2Buffers(fd, dma_mem, size_image) {};
-  ~DMABuffers() {}
-  bool test1;
+    :V4l2Buffers(fd, dma_mem, size_image) {
+  };
+  ~DMABuffers();
+  bool AllocateBuffers() override; // 
+
 private:
-  bool test2;
+  int dma_fd_;
 };
 
 class DMAGPUBuffers : public V4l2Buffers
@@ -70,7 +72,10 @@ public:
   DMAGPUBuffers(int32_t fd, int32_t dma_mem, uint32_t size_image)
     :V4l2Buffers(fd, dma_mem, size_image) {};
   ~DMAGPUBuffers() {}
-  bool test1;
+  bool AllocateBuffers() override; // 
+
 private:
   bool test2;
 };
+
+#endif // V4L2_BUFFERS_H

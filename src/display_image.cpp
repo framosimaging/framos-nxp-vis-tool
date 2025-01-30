@@ -15,13 +15,12 @@
 //#include <algorithm>
 #include <vector>
 #include <chrono>
-#include <fcntl.h>
 #include <sys/ioctl.h>
-
 #include <sys/types.h>
 #include <dirent.h>
 #include <fnmatch.h>
-#include <linux/dma-heap.h>
+#include <fcntl.h>
+
 #include <linux/videodev2.h>
 
 #include <opencv2/highgui.hpp>
@@ -29,14 +28,10 @@
 #include <opencv2/imgcodecs/imgcodecs.hpp>
 //#include <opencv2/core/ocl.hpp>
 
-#ifdef IMX_G2D
-	#include <imx/linux/dma-buf.h>
-	#include <g2d.h>
-	#include <g2dExt.h>
-#endif
 
-
-
+#include <imx/linux/dma-buf.h>
+#include <g2d.h>
+#include <g2dExt.h>
 
 using json = nlohmann::json;
 
@@ -251,25 +246,32 @@ int main(int argc, char **argv) {
         return 1;
     }
     */
+    void *user_buf = malloc(pix_fmt.sizeimage);
+    std::unique_ptr<V4l2Buffers> buffers; 
+    if (dma_mem == 0) {
+      buffers = std::make_unique<MMAPBuffers>(fd, dma_mem, pix_fmt.sizeimage);
+    }
+    else if (dma_mem == 1) {
+      buffers = std::make_unique<DMABuffers>(fd, dma_mem, pix_fmt.sizeimage);
+    }
 
-    V4l2Buffers buffers = MMAPBuffers(fd, dma_mem, pix_fmt.sizeimage);
     std::cout << "Requesting Buffers " << std::endl;
-    ret = buffers.RequestBuffers();
+    ret = buffers->RequestBuffers();
     if (!ret) {
         std::cerr << "Requesting Buffers failed" << std::endl;
         return 1;
     }
-    ret = buffers.Initmmap();
+    ret = buffers->AllocateBuffers();
     if (!ret) {
         std::cerr << "Initializing buffers failed" << std::endl;
         return 1;
     }
-    ret = buffers.QueueAllBuffers();
+    ret = buffers->QueueAllBuffers();
     if (!ret) {
         std::cerr << "Initializing buffers failed" << std::endl;
         return 1;
     }
-    ret = buffers.StartStream();
+    ret = buffers->StartStream();
     if (!ret) {
         std::cerr << "Start Streaming failed" << std::endl;
         return 1;
@@ -295,10 +297,11 @@ int main(int argc, char **argv) {
         }
 
 	tic = std::chrono::high_resolution_clock::now();
-	ret = buffers.DequeueBuffers(&image_data);
+	ret = buffers->DequeueBuffers(&image_data);
 	frame = cv::Mat(1080 + 1080 / 2, 1920, CV_8UC1, image_data);
+	
 	cv::cvtColor(frame, image, cv::COLOR_YUV2BGR_NV12);
-        ret |= buffers.QueueBuffers();
+        ret |= buffers->QueueBuffers();
         toc = std::chrono::high_resolution_clock::now();
 	if (!ret) {
 		std::cerr << "Capturing Failed" << std::endl;
@@ -312,6 +315,7 @@ int main(int argc, char **argv) {
 
 	toc = std::chrono::high_resolution_clock::now();
 	profile_time.show +=  std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
+	
 	if (key == 27 || key == 'q' || key == 'Q') { // ESC key
             std::cout << "Exiting..." << std::endl;
             break;
@@ -325,6 +329,7 @@ int main(int argc, char **argv) {
 		std::cerr << "Failed to save image!" << std::endl;
 	  }
 	}
+	
 
         count_frames += 1;
 	if (cam_conf.profile && count_frames == visualize_num) {
@@ -335,11 +340,11 @@ int main(int argc, char **argv) {
 
     cv::destroyAllWindows();
     std::cout << "Stop streaming..." << std::endl;
-    buffers.StopStream();
+    buffers->StopStream();
     std::cout << "Release buffers..." << std::endl;
-    buffers.ReleaseBuffers();
+    buffers->ReleaseBuffers();
     ::close(fd);
-    //free(user_buf);
+    free(user_buf);
     //free(temp_buffer);
 
     return 0;
