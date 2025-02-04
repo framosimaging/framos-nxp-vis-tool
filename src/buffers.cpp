@@ -23,6 +23,9 @@ V4l2Buffers::V4l2Buffers(int32_t fd, int32_t dma_mem, uint32_t size_image)
   :fd_(fd), dma_mem_(dma_mem), size_image_(size_image) {
   v4l2_memory_ = (dma_mem == 1) ? V4L2_MEMORY_DMABUF : V4L2_MEMORY_MMAP;
   memset(&req_bufs_, 0, sizeof(req_bufs_));
+  // TODO: check
+  memset(&buf_addrs_, 0, sizeof(buf_addrs_));
+  memset(&buf_addr, 0, sizeof(buf_addr));
 }
 
 V4l2Buffers::~V4l2Buffers() {
@@ -48,8 +51,6 @@ bool V4l2Buffers::RequestBuffers() {
   buffers.resize(req_bufs_.count);
   return true;
 }
-
-
 
 bool V4l2Buffers::QueueAllBuffers() {
   for (uint32_t i = 0; i < buffers.size(); i++){
@@ -85,6 +86,7 @@ bool V4l2Buffers::DequeueBuffers(uint8_t **image_data) {
     return false;
   }
   *image_data = &buffers[buf_.index].rawData[0];
+  buf_addr = buf_addrs_[buf_.index];
   //image_data = std::span<uint8_t>(buffers[buf_.index].rawData, buffers[buf_.index].rawLength);
 
   return true;
@@ -160,7 +162,7 @@ void V4l2Buffers::ReleaseBuffers() {
 	std::cerr << "Buffer " << i << "not unmapped: " << strerror(errno) << std::endl;
       }
     }
-    
+
     if (buffers[i].dma_fd > -1) {
 	close(buffers[i].dma_fd);
     }
@@ -202,8 +204,24 @@ bool MMAPBuffers::AllocateBuffers() {
     buffers[i].index = buf.index;
     buffers[i].rawLength = size_image_;
     buffers[i].rawData = static_cast<uint8_t*>(buffer_start);
-    }
 
+    struct v4l2_exportbuffer expbuf;
+    memset(&expbuf, 0, sizeof(expbuf));
+    expbuf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    expbuf.index = i;
+    if (ioctl(fd_, VIDIOC_EXPBUF, &expbuf) < 0) {
+       std::cerr << "VIDIOC_EXPBUF" << strerror(errno) <<  std::endl;
+       return false;
+
+    }
+    std::cout << " EXPBUFFER PLANE \n" << expbuf.plane << std::endl;
+    std::cout << " EXPBUFFER FLAGS \n" << expbuf.flags << std::endl;
+    std::cout << " EXPBUFFER FD \n" << expbuf.fd << std::endl;
+    if (ioctl(expbuf.fd, DMA_BUF_IOCTL_PHYS, &buf_addrs_[i]) < 0) {
+	std::cerr << " EXPBUFFER DMA_BUF_IOCTL_PHYS error \n" << expbuf.fd << std::endl;
+	return false;
+    }
+  }
    return true;
 }
 
@@ -241,6 +259,14 @@ bool DMABuffers::AllocateBuffers() {
     buffers[i].index = i; // TODO is this needed?
     buffers[i].rawLength = size_image_;
     buffers[i].rawData = static_cast<uint8_t*>(buffer_start);
+    if (ioctl(buffers[i].dma_fd, DMA_BUF_IOCTL_PHYS, &buf_addrs_[i]) < 0) {
+	std::cerr << " EXPBUFFER DMA_BUF_IOCTL_PHYS error \n" << buffers[i].dma_fd << std::endl;
+	return false;
+    }
+    std::cout << "raw data" << buffers[i].rawData << std::endl;
+    std::cout << "buffer address: " << buf_addrs_[i].phys << std::endl;
+
+
   }
 
   return true;
@@ -262,5 +288,4 @@ cleanup:
 
 bool DMAGPUBuffers::AllocateBuffers() {
   return true;
-
 }

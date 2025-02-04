@@ -5,6 +5,7 @@
 //#include <cstring>
 #include <cstdint>
 #include <linux/videodev2.h>
+#include <imx/linux/dma-buf.h>
 
 struct V4l2Buffer {
     uint8_t *rawData = nullptr;
@@ -12,6 +13,8 @@ struct V4l2Buffer {
     uint32_t index = 0;
     int32_t dma_fd = -1; // file descriptor used for dma buffer
 };
+
+
 
 class V4l2Buffers {
 public:
@@ -28,6 +31,8 @@ public:
   void ReleaseBuffers();
   bool StopStream();
 
+  struct dma_buf_phys buf_addr;
+
 protected:
 
   int32_t dma_mem_;
@@ -38,6 +43,7 @@ protected:
   static constexpr uint32_t buf_count_ = 3;
   struct v4l2_buffer buf_ {};
   bool stream_on_ = false;
+  struct dma_buf_phys buf_addrs_[buf_count_];
 };
 
 class MMAPBuffers : public V4l2Buffers
