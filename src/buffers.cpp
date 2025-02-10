@@ -212,7 +212,6 @@ bool MMAPBuffers::AllocateBuffers() {
     if (ioctl(fd_, VIDIOC_EXPBUF, &expbuf) < 0) {
        std::cerr << "VIDIOC_EXPBUF" << strerror(errno) <<  std::endl;
        return false;
-
     }
     std::cout << " EXPBUFFER PLANE \n" << expbuf.plane << std::endl;
     std::cout << " EXPBUFFER FLAGS \n" << expbuf.flags << std::endl;
@@ -265,8 +264,6 @@ bool DMABuffers::AllocateBuffers() {
     }
     std::cout << "raw data" << buffers[i].rawData << std::endl;
     std::cout << "buffer address: " << buf_addrs_[i].phys << std::endl;
-
-
   }
 
   return true;

@@ -1,6 +1,3 @@
-#define IMX_G2D 1
-//#define USE_OPENCV 1
-
 #include "CLI11.hpp"
 #include "v4l2_subdevice_controls.hpp"
 #include "buffers.hpp"
@@ -26,11 +23,29 @@
 #include <opencv2/highgui.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
 #include <opencv2/imgcodecs/imgcodecs.hpp>
-//#include <opencv2/core/ocl.hpp>
+#include <opencv2/core/ocl.hpp>
+#include <opencv2/core/opengl.hpp> 
 
 #include <imx/linux/dma-buf.h>
 #include <g2d.h>
 #include <g2dExt.h>
+
+// TODOCL
+#include <CL/opencl.hpp>
+#include <fstream>
+
+// Function to load OpenCL kernel
+cl::Program load_kernel(cl::Context context, std::string kernel_file) {
+    std::ifstream file(kernel_file);
+    if (!file) {
+        std::cerr << "Error: Cannot open kernel file: " << kernel_file << std::endl;
+        exit(1);
+    }
+    std::string kernel_code((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    cl::Program::Sources source;
+    source.push_back({kernel_code.c_str(), kernel_code.length()});
+    return cl::Program(context, source);
+}
 
 using json = nlohmann::json;
 
@@ -46,11 +61,14 @@ enum BitWidth {
 };
 
 const std::map<std::string, uint32_t> abbrev_to_pixel_fmt = {
-    {"GRAY", V4L2_PIX_FMT_GREY},
-    {"Y10", V4L2_PIX_FMT_Y10},
-    {"Y12", V4L2_PIX_FMT_Y12},
+    {"GRAY", V4L2_PIX_FMT_GREY}, // not supported
+    {"Y10", V4L2_PIX_FMT_Y10},   // not supported
+    {"Y12", V4L2_PIX_FMT_Y12},   // not supported
     {"YUYV", V4L2_PIX_FMT_YUYV},
-    {"NV12", V4L2_PIX_FMT_NV12},
+    {"NV12", V4L2_PIX_FMT_NV12}, 
+    {"NV16", V4L2_PIX_FMT_NV16},
+    {"RG10", V4L2_PIX_FMT_SRGGB10}, // not supported
+    {"RG12", V4L2_PIX_FMT_SRGGB12},
 };
 
 //TODO: use this
@@ -79,8 +97,9 @@ struct ProfileApp {
     long long queue;
     long long visualize;
     long long copy_buffer;
-    long long copy_buffer2;
+    long long debayer;
     long long resize;
+    long long endian_conv;
 };
 
 struct CameraConfiguration {
@@ -93,6 +112,87 @@ struct CameraConfiguration {
     BitWidth bit_width = TwelveBits;
     bool profile = false;
 };
+
+void convertBigToLittleEndian(cv::Mat& image) {
+    if (image.type() != CV_16U) {
+        std::cerr << "Error: Image is not 16-bit (CV_16U)!" << std::endl;
+        return;
+    }
+
+    int totalPixels = image.rows * image.cols;
+    uint16_t* data = reinterpret_cast<uint16_t*>(image.data);
+
+    for (int i = 0; i < totalPixels; i++) {
+        data[i] = (data[i] >> 8) | (data[i] << 8);  // Swap bytes for each pixel
+    }
+}
+/*
+const char *oclKernelSource = R"(
+	__kernel void process_raw12(
+	    __global uchar *input, 
+	    __global uchar *output, 
+	    const int width, 
+	    const int height) 
+	{
+	    int i = get_global_id(0) * 2;  // Each pixel is 16-bit (2 bytes)
+	
+	    if (i < width * height * 2) {
+		// Convert Big-Endian to Little-Endian
+		ushort pixel = (input[i] << 8) | input[i + 1];
+	
+		// Convert 16-bit to 8-bit (12-bit data >> 4)
+		//output[i / 2] = pixel;
+		output[i / 2] = (uchar)(pixel >> 4);
+	    }
+	}
+	)";
+*/
+
+const char *oclKernelSource = R"(
+	__kernel void process_raw12(
+	    //__global const ushort *input, 
+	    __global ushort *output, 
+	    const int width, 
+	    const int height) 
+	{
+	    int i = get_global_id(0);
+	
+	    if (i < width * height) {
+		// Convert Big-Endian to Little-Endian
+		ushort pixel = (output[i] >> 8) | (output[i] << 8);
+	
+		// Convert 16-bit to 8-bit (12-bit data >> 4)
+		//output[i / 2] = pixel;
+		//output[i] = input[i];
+		//ushort pixel = input[i];
+		output[i] = pixel;
+	    }
+	}
+	)";
+
+	
+void processRaw12WithOpenCL(cv::UMat &u_raw12, int width, int height) {
+	if (!cv::ocl::haveOpenCL()) {
+	  std::cerr << "OpenCL is not available!" << std::endl;
+	  return;
+	}
+   
+	// Convert raw12 to OpenCL UMat
+	cv::ocl::Context context;
+
+	if (!context.create(cv::ocl::Device::TYPE_GPU)) {
+		std::cerr << "Failed to create OpenCL context!" << std::endl;
+		return;
+	}
+
+
+	cv::ocl::Kernel kernel("process_raw12", cv::ocl::ProgramSource(oclKernelSource));
+	
+	kernel.args(cv::ocl::KernelArg::ReadWriteNoSize(u_raw12), (int)width, (int)height);
+	
+	size_t globalSize = width * height;
+	kernel.run(1, &globalSize, nullptr, false);
+}
 
 static int ParseArguments(int argc, char **argv, nlohmann::json *json_config, CameraConfiguration *cam_conf, int* dma_mem) {
     CLI::App app{"Display Image Example CLI"};
@@ -133,7 +233,7 @@ static int ParseArguments(int argc, char **argv, nlohmann::json *json_config, Ca
     }
 
     // Display the configuration
-    std::cout << "Configuration loaded:"
+    std::cout << "Configuration loaded:" << std::endl
 	<< "\t Camera ID: " << cam_conf->camera_id << std::endl
 	<< "\t Subdevice ID: " << cam_conf->subdevice_id << std::endl
 	<< "\t Resolution: " << cam_conf->resolution[0] << "x" << cam_conf->resolution[1] << std::endl
@@ -168,21 +268,23 @@ static void print_profile_time(struct ProfileApp *profile_time, int visualize_nu
     // only resize, convert, deque and show are relevent
     //std::cout << "Deque time: " << profile_time->deque / visualize_num << " ms" << std::endl;
     std::cout << "Copy buffer time: " << profile_time->copy_buffer / visualize_num << " ms" << std::endl;
-    
-    //std::cout << "Resize image time: " << profile_time->resize / visualize_num << " ms" << std::endl;
-    //std::cout << "Convert image time: " << profile_time->visualize / visualize_num << " ms" << std::endl;
+    std::cout << "Resize image time: " << profile_time->resize / visualize_num << " ms" << std::endl;
+    std::cout << "Convert image time: " << profile_time->visualize / visualize_num << " ms" << std::endl;
+    std::cout << "Debayer time: " << profile_time->debayer / visualize_num << " ms" << std::endl;
     //std::cout << "Draw fps time: " << profile_time->draw_fps / visualize_num << " ms" << std::endl;
     std::cout << "Show image time: " << profile_time->show / visualize_num << " ms" << std::endl;
+    std::cout << "Endian conversion: " << profile_time->endian_conv / visualize_num << " ms" << std::endl;
     //std::cout << "Queue buffer time: " << profile_time->queue / visualize_num << " ms " << std::endl;
 
     profile_time->deque = 0;
     profile_time->copy_buffer = 0;
-    profile_time->copy_buffer2 = 0;
+    profile_time->debayer = 0;
     profile_time->resize = 0;
     profile_time->visualize = 0;
     profile_time->draw_fps = 0;
     profile_time->show = 0;
     profile_time->queue = 0;
+    profile_time->endian_conv = 0;
 }
 
 int main(int argc, char **argv) {
@@ -260,6 +362,59 @@ int main(int argc, char **argv) {
         return 1;
     }
     
+    /*
+    cl::Platform platform = cl::Platform::getDefault();
+    std::cout << "Using OpenCL Platform: " << platform.getInfo<CL_PLATFORM_NAME>() << std::endl;
+    std::cout << "Platform Vendor: " << platform.getInfo<CL_PLATFORM_VENDOR>() << std::endl;
+    std::cout << "Platform Version: " << platform.getInfo<CL_PLATFORM_VERSION>() << std::endl;
+
+    cl::Device device = cl::Device::getDefault();
+    std::cout << "Using OpenCL device : " << device.getInfo<CL_DEVICE_NAME>() << std::endl;
+    cl::Context context(device);
+
+    const char* kernel_code = R"(
+        __kernel void add_vectors(__global const int* a, 
+                          	__global const int* b, 
+                        	__global int* result, 
+			        const int size) {
+	    int id = get_global_id(0);
+	    if (id < size) {
+	        result[id] = a[id] + b[id]; // Now correctly using integers
+	    }
+        }
+     )";
+
+    //cl::Program program = load_kernel(context, "ocl_kernel.cl");
+    cl::Program::Sources source;
+    source.push_back({kernel_code, strlen(kernel_code)});
+    cl::Program program(context, source);
+    program.build({device});
+
+    const int size = 10;
+    std::vector<int> host_a(size, 10);  // Vector A = [10, 10, 10, ...]
+    std::vector<int> host_b(size, 5);   // Vector B = [5, 5, 5, ...]
+    std::vector<int> host_result(size, 0);
+
+    cl::Buffer buffer_a(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(int) * size, host_a.data());
+    cl::Buffer buffer_b(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(int) * size, host_b.data());
+    cl::Buffer buffer_result(context, CL_MEM_WRITE_ONLY, sizeof(int) * size);
+    cl::Kernel kernel(program, "add_vectors");
+
+    kernel.setArg(0, buffer_a);
+    kernel.setArg(1, buffer_b);
+    kernel.setArg(2, buffer_result);
+    kernel.setArg(3, size);
+
+    cl::CommandQueue queue(context, device);
+    queue.enqueueNDRangeKernel(kernel, cl::NullRange, cl::NDRange(size));
+    queue.finish();
+    queue.enqueueReadBuffer(buffer_result, CL_TRUE, 0, sizeof(int) * size, host_result.data());
+
+    std::cout << "Integer Vector Addition Results:" << std::endl;
+    for (int i = 0; i < size; i++) {
+        std::cout << host_a[i] << " + " << host_b[i] << " = " << host_result[i] << std::endl;
+    }
+    */
     cv::Mat image,frame;
      //= cv::Mat(1080 + 1080 / 2, 1920, CV_8UC1, &output[0]);
     std::chrono::time_point<std::chrono::high_resolution_clock> tic, toc;
@@ -281,6 +436,29 @@ int main(int argc, char **argv) {
     int w = 1920;
     int h = 1080;
     d_buf = g2d_alloc(w * h * 4, 2);
+    //cv::UMat processed8U;
+    //processed8U.create(h, w, CV_16UC1); 
+
+    enum g2d_format g2_format;
+    if (pix_fmt.pixelformat == V4L2_PIX_FMT_YUYV)
+      g2_format = G2D_YUYV;
+    else if (pix_fmt.pixelformat == V4L2_PIX_FMT_NV12)
+      g2_format = G2D_NV12;
+    else if (pix_fmt.pixelformat == V4L2_PIX_FMT_NV16)
+      g2_format = G2D_NV16;
+    else 
+      g2_format = G2D_RGBX8888;
+
+    // Step 1-2: Process RAW12 with OpenCL
+    cv::ocl::setUseOpenCL(true);
+    if (!cv::ocl::useOpenCL()) {
+	std::cerr << "OpenCL is NOT enabled in OpenCV!" << std::endl;
+    }
+    //cv::UMat colorImage;
+    //colorImage.create(h, w, CV_16UC3);
+    std::cout << cv::getBuildInformation() << std::endl;
+    //cv::namedWindow("Fast OpenGL Display", cv::WINDOW_OPENGL);
+    //cv::ogl::Texture2D oglTex;
 
     while (true) {
 	fps++;
@@ -292,50 +470,151 @@ int main(int argc, char **argv) {
 	tic = std::chrono::high_resolution_clock::now();
 
 	ret = buffers->DequeueBuffers(&image_data);
-	memset(&src, 0, sizeof(src));
-	memset(&dst, 0, sizeof(dst));
 
-	src.base.left = 0;
-	src.base.top = 0;
-	src.base.right = w;
-	src.base.bottom = h;
-	src.base.width = 1920;
-	src.base.height = 1080;
-	src.base.stride = 1920;
-	src.base.format = G2D_NV12;
-	src.base.planes[0] = buffers->buf_addr.phys;
-	src.base.planes[1] = buffers->buf_addr.phys + 1920 * 1080;
-	src.tiling = G2D_AMPHION_TILED;
+	if (g2_format != G2D_RGBX8888) {
 
-	dst.base.left = 0;
-	dst.base.top = 0;
-	dst.base.right = w;
-	dst.base.bottom = h;
-	dst.base.width = w;
-	dst.base.height = h;
-	dst.base.stride = w;
-	dst.base.planes[0] = d_buf->buf_paddr;
-	dst.base.format = G2D_BGRX8888;
-	dst.tiling = G2D_LINEAR;
+		memset(&src, 0, sizeof(src));
+		memset(&dst, 0, sizeof(dst));
 
-	g2d_blitEx(g2d_handle, &src, &dst);
-	g2d_finish(g2d_handle);
-	ret |= buffers->QueueBuffers();
-        toc = std::chrono::high_resolution_clock::now();
-	if (!ret) {
-		std::cerr << "Capturing Failed" << std::endl;
-		return 1;
+		src.base.left = 0;
+		src.base.top = 0;
+		src.base.right = w;
+		src.base.bottom = h;
+		src.base.width = 1920;
+		src.base.height = 1080;
+		src.base.stride = 1920;
+		src.base.format = g2_format;
+		src.base.planes[0] = buffers->buf_addr.phys;
+		src.base.planes[1] = buffers->buf_addr.phys + 1920 * 1080;
+		src.tiling = G2D_AMPHION_TILED;
+
+		dst.base.left = 0;
+		dst.base.top = 0;
+		dst.base.right = w;
+		dst.base.bottom = h;
+		dst.base.width = w;
+		dst.base.height = h;
+		dst.base.stride = w;
+		dst.base.planes[0] = d_buf->buf_paddr;
+		dst.base.format = G2D_BGRX8888;
+		dst.tiling = G2D_LINEAR;
+
+		g2d_blitEx(g2d_handle, &src, &dst);
+		g2d_finish(g2d_handle);
+		ret |= buffers->QueueBuffers();
+
+		if (!ret) {
+			std::cerr << "Capturing Failed" << std::endl;
+			return 1;
+		}
+		image = cv::Mat(h, w, CV_8UC4, d_buf->buf_vaddr);
+		toc = std::chrono::high_resolution_clock::now();
+		profile_time.copy_buffer += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
+		tic = std::chrono::high_resolution_clock::now();
+		cv::imshow("VIDEO", image);
+
+	} else {
+
+
+	    if (true) { // without gpu 
+		tic = std::chrono::high_resolution_clock::now();
+		image = cv::Mat(h, w, CV_16U, image_data);
+		toc = std::chrono::high_resolution_clock::now();
+		profile_time.copy_buffer += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
+		tic = std::chrono::high_resolution_clock::now();
+		convertBigToLittleEndian(image);
+		toc = std::chrono::high_resolution_clock::now();
+		profile_time.endian_conv += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
+		// test bit conversion
+		cv::Mat frame8;
+		tic = std::chrono::high_resolution_clock::now();
+		image.convertTo(frame8, CV_8UC1, 1.0 / 16.0);
+		ret |= buffers->QueueBuffers();
+		toc = std::chrono::high_resolution_clock::now();
+		profile_time.resize += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
+		
+		//cv::cvtColor(frame8, frame8, cv::COLOR_BayerRG2BGR);
+		//cv::cvtColor(u_raw12, colorImage, cv::COLOR_BayerRG2BGR_EA);  // Uses OpenCL
+		tic = std::chrono::high_resolution_clock::now();
+		cv::cvtColor(frame8, frame8, cv::COLOR_BayerRG2BGR_EA);
+		toc = std::chrono::high_resolution_clock::now();
+		profile_time.debayer += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
+		    
+		tic = std::chrono::high_resolution_clock::now();
+
+    		cv::imshow("VIDEO", frame8); 
+	    } else {
+		tic = std::chrono::high_resolution_clock::now();
+		image = cv::Mat(h, w, CV_16U, image_data);
+		toc = std::chrono::high_resolution_clock::now();
+		cv::UMat u_raw12;
+		image.copyTo(u_raw12);
+		profile_time.copy_buffer += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
+
+		tic = std::chrono::high_resolution_clock::now();
+		//cv::UMat processed8U(h, w, CV_8UC1, cv::USAGE_ALLOCATE_DEVICE_MEMORY);
+		processRaw12WithOpenCL(u_raw12, w, h);
+		// convertBigToLittleEndian(image);
+		toc = std::chrono::high_resolution_clock::now();
+		profile_time.endian_conv += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
+
+		//cv::cvtColor(frame8, frame8, cv::COLOR_BayerRG2BGR);
+
+		//tic = std::chrono::high_resolution_clock::now();
+		//cv::cvtColor(u_raw12, u_raw12, cv::COLOR_BayerRG2BGR);
+		//toc = std::chrono::high_resolution_clock::now();
+		//profile_time.debayer += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
+
+		// test bit conversion
+		cv::Mat frame8;
+
+		cv::Mat mat = u_raw12.getMat(cv::ACCESS_READ);
+		mat.convertTo(frame8, CV_8UC1, 1.0 / 16.0);
+		cv::cvtColor(frame8, frame8, cv::COLOR_BayerRG2BGR);
+
+		cv::imshow("VIDEO", frame8); 
+		//image =cv::Mat(h, w, CV_16U, image_data);
+		//cv::Mat frame8;
+		tic = std::chrono::high_resolution_clock::now();
+		//image.convertTo(frame8, CV_8UC1, 1.0 / 16.0);
+		//cv::UMat u_raw8;
+		//u_raw12.convertTo(u_raw8, CV_8UC1, 1.0 / 16.0);
+
+		toc = std::chrono::high_resolution_clock::now();
+		profile_time.resize += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
+
+		tic = std::chrono::high_resolution_clock::now();
+		// cv::cvtColor(frame8, frame8, cv::COLOR_BayerRG2BGR);
+		//cv::cvtColor(u_raw12, colorImage, cv::COLOR_BayerRG2BGR_EA);  // Uses OpenCL
+		toc = std::chrono::high_resolution_clock::now();
+		profile_time.debayer += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
+
+		tic = std::chrono::high_resolution_clock::now();
+		//cv::UMat colorImage8U;
+		//colorImage.convertTo(colorImage8U, CV_8UC3, 1.0 / 16.0);
+		//image.convertTo(frame8, CV_8UC1, 1.0 / 16.0);
+		ret |= buffers->QueueBuffers();
+		//cv::imshow("VIDEO", frame8);
+		//cv::imshow("VIDEO", colorImage8U);
+		//cv::imshow("VIDEO", frame8);
+		//cv::imshow("VIDEO", processed8U);
+		//cv::imshow("Fast OpenGL Display", u_raw8);
+		//v::imshow("VIDEO", u_raw8); 
+		
+		//colorImage
+		//toc = std::chrono::high_resolution_clock::now();
+		//profile_time.show += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
+	    } // end else truye
+
 	}
-	image = cv::Mat(h, w, CV_8UC4, d_buf->buf_vaddr);
-
 	//frame = cv::Mat(1080 + 1080 / 2, 1920, CV_8UC1, image_data);
 	
 	//cv::cvtColor(frame, image, cv::COLOR_YUV2BGR_NV12);
 
-	profile_time.copy_buffer += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
+	// THIS SHOULD NOT BE COMMENTEDprofile_time.copy_buffer += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
 
-	tic = std::chrono::high_resolution_clock::now();
-	cv::imshow("VIDEO", image);
+	//tic = std::chrono::high_resolution_clock::now();
+	//cv::imshow("VIDEO", image);
 	int key = cv::pollKey();
 
 	toc = std::chrono::high_resolution_clock::now();
