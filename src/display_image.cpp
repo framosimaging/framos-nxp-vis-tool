@@ -141,6 +141,79 @@ const char *oclKernelSource = R"(
 	}
 	)";
 
+const char *oclKernelSourceVer2 = R"(
+	__kernel void process_raw12(
+		__global const ushort *input,
+		__global ushort  *output, 
+		const int width, 
+		const int height) 
+	{
+		int i = get_global_id(0);
+	
+		//ushort4 pixels = input[i];
+		// Convert Big-Endian to Little-Endian
+		//ushort pixel = ((input[i] >> 8) & 0x00FF) | ((input[i] & 0x00FF) << 8);
+		output[i] = (uchar) ((input[i] >> 12) | (input[i] << 4));
+		//output[i] = (uchar) ((pixels >> 12) | (pixels << 4));
+
+
+		//__local ushort localBuffer[256]; 
+    
+		//int i = get_global_id(0);
+		//int localIdx = get_local_id(0);
+
+		// Load data into local memory
+		//localBuffer[localIdx] = input[i];
+		//barrier(CLK_LOCAL_MEM_FENCE); // Sync threads in a workgroup
+
+		// Convert Big-Endian to Little-Endian and shift to 8-bit
+		//output[i] = (uchar) ((localBuffer[localIdx] >> 12) | (localBuffer[localIdx] << 4));
+
+	}
+	)";
+
+const char *oclKernelSourceVer4 = R"(
+	__kernel void process_raw12(
+		__global const ushort *input,
+		__global uchar *output, 
+		const int width, 
+		const int height) 
+	{
+		int i = get_global_id(0);
+	
+		if (i < width * height) {
+			// Convert Big-Endian to Little-Endian
+			ushort pixel = ((input[i] >> 8) & 0x00FF) | ((input[i] & 0x00FF) << 8);
+			output[i] = (uchar) (pixel >> 4);
+		}
+	}
+	)";
+
+const char *oclKernelSourceVer3 = R"(
+	__kernel void process_raw12(
+		__global const uchar2 *input,  // uchar2 to optimize memory reads
+		__global uchar *output, 
+		const int width, 
+		const int height) 
+	{
+		int i = get_global_id(0) * 2; // Process 2 pixels per thread
+	
+		if (i < width * height) {
+		uchar2 pixelPair = input[i / 2];
+	
+		// Convert Big-Endian to Little-Endian for both pixels
+		ushort pixel1 = (ushort)pixelPair.x << 8 | (ushort)pixelPair.y;
+		ushort pixel2 = (ushort)pixelPair.y << 8 | (ushort)pixelPair.x;
+	
+		// Convert from 12-bit to 8-bit
+		output[i] = (uchar)(pixel1 >> 4);
+		if (i + 1 < width * height) {
+			output[i + 1] = (uchar)(pixel2 >> 4);
+		}
+		}
+	}
+	)";
+
 	
 void processRaw12WithOpenCL(cv::UMat &u_raw12, int width, int height) {
 	if (!cv::ocl::haveOpenCL()) {
@@ -179,6 +252,42 @@ void processRaw12WithOpenCL(cv::UMat &u_raw12, int width, int height) {
 	if (!success) {
 		std::cerr << "OpenCL kernel execution failed!" << std::endl;
 	    }
+}
+
+void processRaw12WithOpenCLVer2(uint8_t *image_data, uint8_t **output_data, int width, int height) {
+  
+	// Convert raw12 to OpenCL UMat
+	cl::Device device = cl::Device::getDefault();
+	//std::cout << "Using OpenCL device : " << device.getInfo<CL_DEVICE_NAME>() << std::endl;
+	cl::Context context(device);
+	cl::CommandQueue queue(context, device);
+
+	cl::Program::Sources source;
+	source.push_back({oclKernelSourceVer2, strlen(oclKernelSourceVer2)});
+
+	cl::Program program(context, source);
+	program.build({device});
+	const size_t numPixels = width * height;
+
+	cl::Buffer inputBuffer(context,
+		CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
+		numPixels * 2,
+		image_data);
+	
+	cl::Buffer outputBuffer(context, CL_MEM_WRITE_ONLY, numPixels);
+
+	cl::Kernel kernel(program, "process_raw12");
+
+	kernel.setArg(0, inputBuffer);
+	kernel.setArg(1, outputBuffer);
+	kernel.setArg(2, (int)width);
+	kernel.setArg(3, (int)height);
+
+	cl::NDRange globalSize(numPixels);
+	queue.enqueueNDRangeKernel(kernel, cl::NullRange, globalSize, cl::NullRange);
+        queue.finish();
+	
+	queue.enqueueReadBuffer(outputBuffer, CL_TRUE, 0, numPixels, *output_data);
 }
 
 static int ParseArguments(int argc, char **argv, nlohmann::json *json_config, CameraConfiguration *cam_conf, int* dma_mem) {
@@ -412,6 +521,7 @@ int main(int argc, char **argv) {
     uint32_t fps = 0;
     auto ts_loop = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
     uint8_t *image_data;
+    uint8_t *output_data = new uint8_t[1920*1080];
     struct g2d_surfaceEx src, dst;
     struct g2d_buf *d_buf;
 
@@ -445,6 +555,30 @@ int main(int argc, char **argv) {
     //colorImage.create(h, w, CV_16UC3);
     //cv::namedWindow("Fast OpenGL Display", cv::WINDOW_OPENGL);
     //cv::ogl::Texture2D oglTex;
+
+    cl::Device device = cl::Device::getDefault();
+    //std::cout << "Using OpenCL device : " << device.getInfo<CL_DEVICE_NAME>() << std::endl;
+    cl::Context context(device);
+    cl::CommandQueue queue(context, device);
+
+
+    cl::Program::Sources source;
+    source.push_back({oclKernelSourceVer2, strlen(oclKernelSourceVer2)});
+
+    cl::Program program(context, source);
+    program.build({device});
+    cl::Kernel kernel(program, "process_raw12");
+    const size_t numPixels = 1920 * 1080;
+    cl::NDRange globalSize(numPixels);
+    //size_t localSize = 64;
+    //cl::NDRange globalSize((numPixels + 255) / 256 * 256);
+    cl::NDRange localSize(64);
+
+    cl::Buffer inputBuffer(context, CL_MEM_READ_ONLY, numPixels*2);
+	
+    cl::Buffer outputBuffer(context, CL_MEM_WRITE_ONLY | CL_MEM_ALLOC_HOST_PTR, numPixels);
+    void* mapped_output = queue.enqueueMapBuffer(outputBuffer, CL_TRUE, CL_MAP_READ, 0, numPixels);
+    cv::Mat output_image(1080, 1920, CV_8U, mapped_output);
 
     while (true) {
 	fps++;
@@ -529,15 +663,35 @@ int main(int argc, char **argv) {
     		cv::imshow("VIDEO", frame8); 
 	    } else {
 		tic = std::chrono::high_resolution_clock::now();
-		image = cv::Mat(h, w, CV_16U, image_data);
-		cv::UMat u_raw12;
-		image.copyTo(u_raw12);
+
+		//queue.enqueueWriteBuffer(inputBuffer, CL_TRUE, 0, numPixels * 2, reinterpret_cast<uint16_t *>(image_data));
+		queue.enqueueWriteBuffer(inputBuffer, CL_TRUE, 0, numPixels * 2, image_data);
+		/*cl::Buffer inputBuffer(
+			context,
+			CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR,
+			numPixels * 2, // 16-bit data
+			reinterpret_cast<void *>(buffers->buf_addr.phys) // Map to existing buffer
+		);*/
+
+		kernel.setArg(0, inputBuffer);
+		kernel.setArg(1, outputBuffer);
+		kernel.setArg(2, (int)w);
+		kernel.setArg(3, (int)h);
 		toc = std::chrono::high_resolution_clock::now();
 		profile_time.copy_buffer += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
 
 		tic = std::chrono::high_resolution_clock::now();
-		//cv::UMat processed8U(h, w, CV_8UC1, cv::USAGE_ALLOCATE_DEVICE_MEMORY);
-		processRaw12WithOpenCL(u_raw12, w, h);
+		//queue.enqueueNDRangeKernel(kernel, cl::NullRange, globalSize, localSize);
+		//queue.finish();
+
+		// Run Kernel Asynchronously
+		cl::Event kernel_event;
+		queue.enqueueNDRangeKernel(kernel, cl::NullRange, cl::NDRange(numPixels), cl::NullRange, nullptr, &kernel_event);
+	    
+		// Wait only for this kernel (DO NOT CALL queue.finish())
+		kernel_event.wait();
+		
+		//processRaw12WithOpenCLVer2(image_data, &output_data, w, h);
 		//convertBigToLittleEndian(image);
 		toc = std::chrono::high_resolution_clock::now();
 		profile_time.endian_conv += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
@@ -554,13 +708,16 @@ int main(int argc, char **argv) {
 		//image =cv::Mat(h, w, CV_16U, image_data);
 		//cv::Mat frame8;
 		tic = std::chrono::high_resolution_clock::now();
-
+		//queue.enqueueReadBuffer(outputBuffer, CL_TRUE, 0, numPixels, output_data);
+		//void* mapped_output = queue.enqueueMapBuffer(outputBuffer, CL_TRUE, CL_MAP_READ, 0, numPixels);
+		queue.enqueueUnmapMemObject(outputBuffer, mapped_output);
+		queue.finish(); // Ensure buffer is unmapped before next frame
 		//cv::Mat mat = u_raw12.getMat(cv::ACCESS_READ);
 		//cv::Mat frame8;
 		//mat.convertTo(frame8, CV_8UC1, 1.0 / 16.0);
 		//image.convertTo(frame8, CV_8UC1, 1.0 / 16.0);
-		cv::UMat u_raw8;
-		u_raw12.convertTo(u_raw8, CV_8UC1, 1.0 / 16.0);
+		//cv::UMat u_raw8;
+		//u_raw12.convertTo(u_raw8, CV_8UC1, 1.0 / 16.0);
 		ret |= buffers->QueueBuffers();
 
 		toc = std::chrono::high_resolution_clock::now();
@@ -568,12 +725,19 @@ int main(int argc, char **argv) {
 
 		tic = std::chrono::high_resolution_clock::now();
 		//cv::Mat mat = u_raw12.getMat(cv::ACCESS_READ);
+		//cv::Mat output_image = cv::Mat(h, w, CV_8U, output_data);
+		//cv::Mat output_image = cv::Mat(h, w, CV_8U, mapped_output);
+		// 1. Map OpenCL output buffer to host memory
+		// 3. Unmap the buffer after OpenCV processing
+		//cv::cvtColor(output_image, output_image, cv::COLOR_BayerRG2BGR);
+		queue.enqueueUnmapMemObject(outputBuffer, mapped_output);
+		queue.finish();
+		//cv::Mat output2_image;
 
-		cv::cvtColor(u_raw8, u_raw8, cv::COLOR_BayerRG2BGR);
 		//cv::cvtColor(mat, colorImage, cv::COLOR_BayerRG2BGR);  // Uses OpenCL
 		//cv::Mat mat = u_raw8.getMat(cv::ACCESS_READ);
-		cv::Mat mat;
-		u_raw8.copyTo(mat);
+		//cv::Mat mat;
+		//u_raw8.copyTo(mat);
 		toc = std::chrono::high_resolution_clock::now();
 		profile_time.debayer += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
 
@@ -581,7 +745,7 @@ int main(int argc, char **argv) {
 		//cv::UMat colorImage8U;
 		//colorImage.convertTo(colorImage8U, CV_8UC3, 1.0 / 16.0);
 		//image.convertTo(frame8, CV_8UC1, 1.0 / 16.0);
-		cv::imshow("VIDEO", u_raw8); 
+		cv::imshow("VIDEO", output_image); 
 		
 	    } // end else true
 
