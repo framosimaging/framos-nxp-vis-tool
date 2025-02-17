@@ -24,7 +24,6 @@
 #include <opencv2/imgproc/imgproc.hpp>
 #include <opencv2/imgcodecs/imgcodecs.hpp>
 #include <opencv2/core/ocl.hpp>
-#include <opencv2/core/opengl.hpp> 
 
 #include <imx/linux/dma-buf.h>
 #include <g2d.h>
@@ -49,10 +48,8 @@ cl::Program load_kernel(cl::Context context, std::string kernel_file) {
 
 using json = nlohmann::json;
 
-
 bool xioctl(int fd, unsigned long request, void* arg);
 void DrawFps(cv::Mat &mat, uint32_t displayFps);
-
 
 enum BitWidth {
   EightBits = 8,
@@ -126,31 +123,9 @@ void convertBigToLittleEndian(cv::Mat& image) {
         data[i] = (data[i] >> 8) | (data[i] << 8);  // Swap bytes for each pixel
     }
 }
-/*
-const char *oclKernelSource = R"(
-	__kernel void process_raw12(
-	    __global uchar *input, 
-	    __global uchar *output, 
-	    const int width, 
-	    const int height) 
-	{
-	    int i = get_global_id(0) * 2;  // Each pixel is 16-bit (2 bytes)
-	
-	    if (i < width * height * 2) {
-		// Convert Big-Endian to Little-Endian
-		ushort pixel = (input[i] << 8) | input[i + 1];
-	
-		// Convert 16-bit to 8-bit (12-bit data >> 4)
-		//output[i / 2] = pixel;
-		output[i / 2] = (uchar)(pixel >> 4);
-	    }
-	}
-	)";
-*/
 
 const char *oclKernelSource = R"(
 	__kernel void process_raw12(
-	    //__global const ushort *input, 
 	    __global ushort *output, 
 	    const int width, 
 	    const int height) 
@@ -159,12 +134,8 @@ const char *oclKernelSource = R"(
 	
 	    if (i < width * height) {
 		// Convert Big-Endian to Little-Endian
-		ushort pixel = (output[i] >> 8) | (output[i] << 8);
-	
-		// Convert 16-bit to 8-bit (12-bit data >> 4)
-		//output[i / 2] = pixel;
-		//output[i] = input[i];
-		//ushort pixel = input[i];
+		//ushort pixel = (output[i] >> 8) | (output[i] << 8);
+	        ushort pixel = (output[i] >> 8) | (output[i] << 8);
 		output[i] = pixel;
 	    }
 	}
@@ -184,14 +155,30 @@ void processRaw12WithOpenCL(cv::UMat &u_raw12, int width, int height) {
 		std::cerr << "Failed to create OpenCL context!" << std::endl;
 		return;
 	}
+	//cv::ocl::Device(context.device(0)).set(cv::ocl::Device::TYPE_GPU);
+	cv::ocl::Device device = context.device(0);
 
+	cv::String errMsg;
+	cv::ocl::Kernel kernel("process_raw12", cv::ocl::ProgramSource(oclKernelSource), errMsg);
 
-	cv::ocl::Kernel kernel("process_raw12", cv::ocl::ProgramSource(oclKernelSource));
 	
-	kernel.args(cv::ocl::KernelArg::ReadWriteNoSize(u_raw12), (int)width, (int)height);
+        //cv::ocl::ProgramSource source(oclKernelSource);
+        //cv::ocl::Kernel kernel("process_raw12", source, errMsg);
+
+	if (kernel.empty()) {
+	     std::cerr << "Failed to compile OpenCL kernel: " << errMsg << std::endl;
+	return;
+	}
+	//u_raw12.getUMat(cv::ACCESS_RW, cv::USAGE_ALLOCATE_DEVICE_MEMORY);
+
+	kernel.args(cv::ocl::KernelArg::PtrReadWrite(u_raw12), width, height);
+	//kernel.args(cv::ocl::KernelArg::ReadWriteNoSize(u_raw12), (int)width, (int)height);
 	
 	size_t globalSize = width * height;
-	kernel.run(1, &globalSize, nullptr, false);
+	bool success = kernel.run(1, &globalSize, nullptr, true);
+	if (!success) {
+		std::cerr << "OpenCL kernel execution failed!" << std::endl;
+	    }
 }
 
 static int ParseArguments(int argc, char **argv, nlohmann::json *json_config, CameraConfiguration *cam_conf, int* dma_mem) {
@@ -419,7 +406,7 @@ int main(int argc, char **argv) {
      //= cv::Mat(1080 + 1080 / 2, 1920, CV_8UC1, &output[0]);
     std::chrono::time_point<std::chrono::high_resolution_clock> tic, toc;
     struct ProfileApp profile_time = {};
-    uint32_t visualize_num = 100;
+    uint32_t visualize_num = 30;
     uint32_t count_frames = 0;
     uint32_t one_sec = 1000;
     uint32_t fps = 0;
@@ -454,9 +441,8 @@ int main(int argc, char **argv) {
     if (!cv::ocl::useOpenCL()) {
 	std::cerr << "OpenCL is NOT enabled in OpenCV!" << std::endl;
     }
-    //cv::UMat colorImage;
+    cv::UMat colorImage;
     //colorImage.create(h, w, CV_16UC3);
-    std::cout << cv::getBuildInformation() << std::endl;
     //cv::namedWindow("Fast OpenGL Display", cv::WINDOW_OPENGL);
     //cv::ogl::Texture2D oglTex;
 
@@ -508,24 +494,24 @@ int main(int argc, char **argv) {
 			return 1;
 		}
 		image = cv::Mat(h, w, CV_8UC4, d_buf->buf_vaddr);
+
 		toc = std::chrono::high_resolution_clock::now();
 		profile_time.copy_buffer += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
 		tic = std::chrono::high_resolution_clock::now();
 		cv::imshow("VIDEO", image);
 
 	} else {
-
-
-	    if (true) { // without gpu 
+	    if (false) { // without gpu 
 		tic = std::chrono::high_resolution_clock::now();
 		image = cv::Mat(h, w, CV_16U, image_data);
 		toc = std::chrono::high_resolution_clock::now();
 		profile_time.copy_buffer += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
+
 		tic = std::chrono::high_resolution_clock::now();
 		convertBigToLittleEndian(image);
 		toc = std::chrono::high_resolution_clock::now();
 		profile_time.endian_conv += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
-		// test bit conversion
+
 		cv::Mat frame8;
 		tic = std::chrono::high_resolution_clock::now();
 		image.convertTo(frame8, CV_8UC1, 1.0 / 16.0);
@@ -533,28 +519,26 @@ int main(int argc, char **argv) {
 		toc = std::chrono::high_resolution_clock::now();
 		profile_time.resize += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
 		
-		//cv::cvtColor(frame8, frame8, cv::COLOR_BayerRG2BGR);
 		//cv::cvtColor(u_raw12, colorImage, cv::COLOR_BayerRG2BGR_EA);  // Uses OpenCL
 		tic = std::chrono::high_resolution_clock::now();
-		cv::cvtColor(frame8, frame8, cv::COLOR_BayerRG2BGR_EA);
+		cv::cvtColor(frame8, frame8, cv::COLOR_BayerRG2BGR);
 		toc = std::chrono::high_resolution_clock::now();
 		profile_time.debayer += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
 		    
 		tic = std::chrono::high_resolution_clock::now();
-
     		cv::imshow("VIDEO", frame8); 
 	    } else {
 		tic = std::chrono::high_resolution_clock::now();
 		image = cv::Mat(h, w, CV_16U, image_data);
-		toc = std::chrono::high_resolution_clock::now();
 		cv::UMat u_raw12;
 		image.copyTo(u_raw12);
+		toc = std::chrono::high_resolution_clock::now();
 		profile_time.copy_buffer += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
 
 		tic = std::chrono::high_resolution_clock::now();
 		//cv::UMat processed8U(h, w, CV_8UC1, cv::USAGE_ALLOCATE_DEVICE_MEMORY);
 		processRaw12WithOpenCL(u_raw12, w, h);
-		// convertBigToLittleEndian(image);
+		//convertBigToLittleEndian(image);
 		toc = std::chrono::high_resolution_clock::now();
 		profile_time.endian_conv += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
 
@@ -566,26 +550,30 @@ int main(int argc, char **argv) {
 		//profile_time.debayer += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
 
 		// test bit conversion
-		cv::Mat frame8;
 
-		cv::Mat mat = u_raw12.getMat(cv::ACCESS_READ);
-		mat.convertTo(frame8, CV_8UC1, 1.0 / 16.0);
-		cv::cvtColor(frame8, frame8, cv::COLOR_BayerRG2BGR);
-
-		cv::imshow("VIDEO", frame8); 
 		//image =cv::Mat(h, w, CV_16U, image_data);
 		//cv::Mat frame8;
 		tic = std::chrono::high_resolution_clock::now();
+
+		//cv::Mat mat = u_raw12.getMat(cv::ACCESS_READ);
+		//cv::Mat frame8;
+		//mat.convertTo(frame8, CV_8UC1, 1.0 / 16.0);
 		//image.convertTo(frame8, CV_8UC1, 1.0 / 16.0);
-		//cv::UMat u_raw8;
-		//u_raw12.convertTo(u_raw8, CV_8UC1, 1.0 / 16.0);
+		cv::UMat u_raw8;
+		u_raw12.convertTo(u_raw8, CV_8UC1, 1.0 / 16.0);
+		ret |= buffers->QueueBuffers();
 
 		toc = std::chrono::high_resolution_clock::now();
 		profile_time.resize += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
 
 		tic = std::chrono::high_resolution_clock::now();
-		// cv::cvtColor(frame8, frame8, cv::COLOR_BayerRG2BGR);
-		//cv::cvtColor(u_raw12, colorImage, cv::COLOR_BayerRG2BGR_EA);  // Uses OpenCL
+		//cv::Mat mat = u_raw12.getMat(cv::ACCESS_READ);
+
+		cv::cvtColor(u_raw8, u_raw8, cv::COLOR_BayerRG2BGR);
+		//cv::cvtColor(mat, colorImage, cv::COLOR_BayerRG2BGR);  // Uses OpenCL
+		//cv::Mat mat = u_raw8.getMat(cv::ACCESS_READ);
+		cv::Mat mat;
+		u_raw8.copyTo(mat);
 		toc = std::chrono::high_resolution_clock::now();
 		profile_time.debayer += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
 
@@ -593,25 +581,17 @@ int main(int argc, char **argv) {
 		//cv::UMat colorImage8U;
 		//colorImage.convertTo(colorImage8U, CV_8UC3, 1.0 / 16.0);
 		//image.convertTo(frame8, CV_8UC1, 1.0 / 16.0);
-		ret |= buffers->QueueBuffers();
-		//cv::imshow("VIDEO", frame8);
-		//cv::imshow("VIDEO", colorImage8U);
-		//cv::imshow("VIDEO", frame8);
-		//cv::imshow("VIDEO", processed8U);
-		//cv::imshow("Fast OpenGL Display", u_raw8);
-		//v::imshow("VIDEO", u_raw8); 
+		cv::imshow("VIDEO", u_raw8); 
 		
-		//colorImage
-		//toc = std::chrono::high_resolution_clock::now();
-		//profile_time.show += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
-	    } // end else truye
+	    } // end else true
 
 	}
 	//frame = cv::Mat(1080 + 1080 / 2, 1920, CV_8UC1, image_data);
 	
 	//cv::cvtColor(frame, image, cv::COLOR_YUV2BGR_NV12);
 
-	// THIS SHOULD NOT BE COMMENTEDprofile_time.copy_buffer += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
+	// THIS SHOULD NOT BE COMMENTED
+	// profile_time.copy_buffer += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
 
 	//tic = std::chrono::high_resolution_clock::now();
 	//cv::imshow("VIDEO", image);
