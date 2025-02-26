@@ -9,5 +9,6 @@
 		"Frame rate": 50,
 		"Gain": 600
 	},
-	"save_image": false
+	"save_image": false,
+	"use_gpu": true
 }

@@ -37,6 +37,11 @@
 struct uchar3 {
 	uchar x, y, z;
     };
+
+struct uchar4 {
+	uchar x, y, z, w;
+    };
+
 // Function to load OpenCL kernel
 cl::Program load_kernel(cl::Context context, std::string kernel_file) {
     std::ifstream file(kernel_file);
@@ -130,79 +135,41 @@ void convertBigToLittleEndian(cv::Mat& image) {
 }
 
 const char *demosaicKernel = R"(
-	__kernel void process_raw12(
-	__global const ushort *bayer,  // Input Bayer image (16-bit)
-	__global uchar *rgb,           // Output RGB image (8-bit)
-	const int width, 
-	const int height)
-	{
-	int x = get_global_id(0);
-	int y = get_global_id(1);
-	int index = width * y + x;
-
-	if (x >= width || y >= height) return;
+	__kernel void demosaic(__global const ushort* src, __global uchar4* dst, int width) {
+	    int i = get_global_id(1) * 2;
+	    int j = get_global_id(0) * 2;
+	    
+	    int idxR  = i * width + j;
+	    int idxG1 = i * width + j + 1;
+	    int idxG2 = (i + 1) * width + j;
+	    int idxB  = (i + 1) * width + j + 1;
     
-	#define maxVal (1920 * 1080 - 1)
-	//#define CLAMP(v) ((v) < 0 ? 0 : ((v) > (maxVal) ? (maxVal) : (v)))
-	// Extracts a 16-bit pixel value from bayer array safely
-	//#define EXTRACT_PIXEL(xx, yy) (bayer[CLAMP((yy) * width + (xx))])
-
-	// Transforms 16-bit pixel value to 8-bit
-	#define TRANSFORM_PIXEL(val) ( (uchar) ( (val >> 12) | ( val << 4) ) )
-	//#define TRANSFORM_PIXEL(val) ( (val >> 12) | ( val << 4) ) )
-
-	// Combined macro to get a transformed pixel
-	//#define GET_PIXEL(xx, yy) (TRANSFORM_PIXEL(EXTRACT_PIXEL(xx, yy)))
-	//#define GET_PIXEL(xx, yy) (xx + yy)
-	//ushort r = 0, g = 0, b = 0;
-	uchar r = 0, g = 0, b = 0;
-	/*
-	bool isGreen = ((x % 2) == (y % 2));
-	bool isRed = (y % 2 == 0) && (x % 2 == 0);
-	bool isBlue = (y % 2 == 1) && (x % 2 == 1);
-	*/
-	/*
-	b = (x + y + x + y) >> 2;
-	r = (x + y + x + y) >> 2;
-	g = (x + y + x + y) >> 2;
-	*/
-        /*
-	if (isRed) {
-	    r = GET_PIXEL(x, y);
-	    g = (GET_PIXEL(x - 1, y) + GET_PIXEL(x + 1, y) + GET_PIXEL(x, y - 1) + GET_PIXEL(x, y + 1)) / 4;
-	    b = (GET_PIXEL(x - 1, y - 1) + GET_PIXEL(x + 1, y - 1) + GET_PIXEL(x - 1, y + 1) + GET_PIXEL(x + 1, y + 1)) / 4;
-	} 
-	else if (isBlue) {
-	    b = GET_PIXEL(x, y);
-	    g = (GET_PIXEL(x - 1, y) + GET_PIXEL(x + 1, y) + GET_PIXEL(x, y - 1) + GET_PIXEL(x, y + 1)) / 4;
-	    r = (GET_PIXEL(x - 1, y - 1) + GET_PIXEL(x + 1, y - 1) + GET_PIXEL(x - 1, y + 1) + GET_PIXEL(x + 1, y + 1)) / 4;
-	} 
-	else {  // Green pixel
-	    g = GET_PIXEL(x, y);
-	    if (y % 2 == 0) {
-		r = (GET_PIXEL(x - 1, y) + GET_PIXEL(x + 1, y)) / 2;
-		b = (GET_PIXEL(x, y - 1) + GET_PIXEL(x, y + 1)) / 2;
-	    } else {
-		b = (GET_PIXEL(x - 1, y) + GET_PIXEL(x + 1, y)) / 2;
-		r = (GET_PIXEL(x, y - 1) + GET_PIXEL(x, y + 1)) / 2;
-	    }
+	    if (i + 1 >= get_global_size(1) * 2 || j + 1 >= get_global_size(0) * 2)
+		return;
+    
+	    // Read 16-bit input values
+	    ushort r = src[idxR];
+	    ushort g1 = src[idxG1];
+	    ushort g2 = src[idxG2];
+	    ushort b = src[idxB];
+    
+	    // Convert 16-bit values to 8-bit (preserving high bits)
+	    uchar R  = (uchar) ((r >> 12) | (r << 4));
+	    uchar G1 = (uchar) ((g1 >> 12) | (g1 << 4));
+	    uchar G2 = (uchar) ((g2 >> 12) | (g2 << 4));
+	    uchar B  = (uchar) ((b >> 12) | (b << 4));
+    
+	    // Store output as uchar3 (B, G, R format)
+	    uchar4 pixel1 = (uchar4)(B, G1, R, 255);
+	    uchar4 pixel2 = (uchar4)(B, G2, R, 255);
+    
+	    // Write directly to BGR output buffer
+	    dst[idxR]  = pixel1;  // Top-left (R pixel)
+	    dst[idxG1] = pixel1;  // Top-right (G1 pixel)
+	    dst[idxG2] = pixel2;  // Bottom-left (G2 pixel)
+	    dst[idxB]  = pixel2;  // Bottom-right (B pixel)
 	}
-	*/
-	
-	// Store result in RGB format
-	
-	int rgbIndex = index * 3;
-	/*
-	rgb[rgbIndex] = (uchar) r;
-	rgb[rgbIndex + 1] = (uchar) g;
-	rgb[rgbIndex + 2] = (uchar)b;
-	*/
-	rgb[rgbIndex] = r;
-	rgb[rgbIndex + 1] = g;
-	rgb[rgbIndex + 2] = b;
-	
-	}
-	)";
+    )";
 
 /*
 void processRaw12WithOpenCL(cv::UMat &u_raw12, int width, int height) {
@@ -447,60 +414,8 @@ int main(int argc, char **argv) {
         std::cerr << "Start Streaming failed" << std::endl;
         return 1;
     }
-    
-    /*
-    cl::Platform platform = cl::Platform::getDefault();
-    std::cout << "Using OpenCL Platform: " << platform.getInfo<CL_PLATFORM_NAME>() << std::endl;
-    std::cout << "Platform Vendor: " << platform.getInfo<CL_PLATFORM_VENDOR>() << std::endl;
-    std::cout << "Platform Version: " << platform.getInfo<CL_PLATFORM_VERSION>() << std::endl;
 
-    cl::Device device = cl::Device::getDefault();
-    std::cout << "Using OpenCL device : " << device.getInfo<CL_DEVICE_NAME>() << std::endl;
-    cl::Context context(device);
 
-    const char* kernel_code = R"(
-        __kernel void add_vectors(__global const int* a, 
-                          	__global const int* b, 
-                        	__global int* result, 
-			        const int size) {
-	    int id = get_global_id(0);
-	    if (id < size) {
-	        result[id] = a[id] + b[id]; // Now correctly using integers
-	    }
-        }
-     )";
-
-    //cl::Program program = load_kernel(context, "ocl_kernel.cl");
-    cl::Program::Sources source;
-    source.push_back({kernel_code, strlen(kernel_code)});
-    cl::Program program(context, source);
-    program.build({device});
-
-    const int size = 10;
-    std::vector<int> host_a(size, 10);  // Vector A = [10, 10, 10, ...]
-    std::vector<int> host_b(size, 5);   // Vector B = [5, 5, 5, ...]
-    std::vector<int> host_result(size, 0);
-
-    cl::Buffer buffer_a(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(int) * size, host_a.data());
-    cl::Buffer buffer_b(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, sizeof(int) * size, host_b.data());
-    cl::Buffer buffer_result(context, CL_MEM_WRITE_ONLY, sizeof(int) * size);
-    cl::Kernel kernel(program, "add_vectors");
-
-    kernel.setArg(0, buffer_a);
-    kernel.setArg(1, buffer_b);
-    kernel.setArg(2, buffer_result);
-    kernel.setArg(3, size);
-
-    cl::CommandQueue queue(context, device);
-    queue.enqueueNDRangeKernel(kernel, cl::NullRange, cl::NDRange(size));
-    queue.finish();
-    queue.enqueueReadBuffer(buffer_result, CL_TRUE, 0, sizeof(int) * size, host_result.data());
-
-    std::cout << "Integer Vector Addition Results:" << std::endl;
-    for (int i = 0; i < size; i++) {
-        std::cout << host_a[i] << " + " << host_b[i] << " = " << host_result[i] << std::endl;
-    }
-    */
     cv::Mat image,frame;
      //= cv::Mat(1080 + 1080 / 2, 1920, CV_8UC1, &output[0]);
     std::chrono::time_point<std::chrono::high_resolution_clock> tic, toc;
@@ -570,7 +485,7 @@ int main(int argc, char **argv) {
 
     cl::Device device = cl::Device::getDefault();
     cl::Context context(device);
-    cl::CommandQueue queue(context, device);
+    cl::CommandQueue queue(context, device, CL_QUEUE_PROFILING_ENABLE);
     std::cout << "Using OpenCL device : " << device.getInfo<CL_DEVICE_NAME>() << std::endl;
 
     cl::Program::Sources source;
@@ -581,33 +496,32 @@ int main(int argc, char **argv) {
     source.push_back({demosaicKernel, strlen(demosaicKernel)});
     cl::Program program(context, source);
     program.build({device});
-    cl::Kernel kernel(program, "process_raw12");
+    cl::Kernel kernel(program, "demosaic");
     int width = 1920;
     int height = 1080;
     const size_t numPixels = width * height;
     
     //size_t localSize = 64;
 
- 
-    cl::Buffer inputBuffer(context, CL_MEM_READ_ONLY, numPixels*2);
 
-    int output_buffer_size = numPixels * 2;
-    //cl::NDRange globalSize(numPixels);
-    cl::NDRange globalSize(width, height);
+    //int output_buffer_size = numPixels * 2;   //cl::NDRange globalSize(numPixels);
+    cl::NDRange globalSize(960, 540);
     //cv:Mat output_image(1080, 1920, CV_16U, mapped_output);
     //cl::Buffer outputBuffer(context, CL_MEM_WRITE_ONLY | CL_MEM_ALLOC_HOST_PTR, output_buffer_size);
     //void* mapped_output = queue.enqueueMapBuffer(outputBuffer, CL_TRUE, CL_MAP_READ, 0, output_buffer_size);
 
-    cl::Buffer outputBuffer(context, CL_MEM_WRITE_ONLY, numPixels * 3);
+    //cl::Buffer outputBuffer(context, CL_MEM_WRITE_ONLY, numPixels * 3);
     d_buf = g2d_alloc(w * h * 4, 2);
+    cl::Buffer outputBuffer(context, CL_MEM_WRITE_ONLY, numPixels * 4);
+    //cl::Buffer outputBuffer(context, CL_MEM_WRITE_ONLY | CL_MEM_ALLOC_HOST_PTR, width * height * 4);
 
-
-    //cl::Buffer outputBuffer(context, CL_MEM_WRITE_ONLY | CL_MEM_ALLOC_HOST_PTR, numPixels * 3);
-
-    //void* mapped_output = queue.enqueueMapBuffer(outputBuffer3d, CL_TRUE, CL_MAP_READ, 0, numPixels * 3);
-    //cv::Mat output_image3d(1080, 1920, CV_8UC3, mapped_output); 
+    //void* mapped_output = (void*) queue.enqueueMapBuffer(outputBuffer, CL_TRUE, CL_MAP_READ, 0, width * height * 4);
+    //cv::Mat output_image(height, width, CV_8UC4, mapped_output);
+    
+    cl::Buffer inputBuffer(context, CL_MEM_READ_ONLY, numPixels * 2);
 
     while (true) {
+	
 	fps++;
         if ((std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() - ts_loop) > one_sec) {
             ts_loop = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
@@ -619,6 +533,7 @@ int main(int argc, char **argv) {
 	ret = buffers->DequeueBuffers(&image_data);
 
 	if (g2_format != G2D_RGBX8888) {
+
 		memset(&src, 0, sizeof(src));
 		memset(&dst, 0, sizeof(dst));
 
@@ -702,18 +617,10 @@ int main(int argc, char **argv) {
 	    } else {
 		tic = std::chrono::high_resolution_clock::now();
 		queue.enqueueWriteBuffer(inputBuffer, CL_TRUE, 0, numPixels * 2, reinterpret_cast<uint16_t *>(image_data));
-		//queue.enqueueWriteBuffer(inputBuffer, CL_TRUE, 0, numPixels * 2, image_data);
-		/*cl::Buffer inputBuffer(
-			context,
-			CL_MEM_READ_ONLY | CL_MEM_USE_HOST_PTR,
-			numPixels * 2, // 16-bit data
-			reinterpret_cast<void *>(buffers->buf_addr.phys) // Map to existing buffer
-		);*/
 
 		kernel.setArg(0, inputBuffer);
 		kernel.setArg(1, outputBuffer);
-		kernel.setArg(2, (int)w);
-		kernel.setArg(3, (int)h);
+		kernel.setArg(2, width);
 		toc = std::chrono::high_resolution_clock::now();
 		profile_time.copy_buffer += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
 
@@ -730,8 +637,14 @@ int main(int argc, char **argv) {
 		toc = std::chrono::high_resolution_clock::now();
 		profile_time.endian_conv += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
 		tic = std::chrono::high_resolution_clock::now();
-		cv::Mat rgb(height, width, CV_8UC3);
-                //ueue.enqueueReadBuffer(outputBuffer, CL_TRUE, 0, 1920 * 1080 * 3, rgb.data);
+		
+		cv::Mat rgb(height, width, CV_8UC4);
+		//output_image.copyTo(rgb);
+
+		//cv::Mat rgb(height, width, CV_8UC3);
+		//cv::cvtColor(output_image, rgb, cv::COLOR_RGBA2RGB);
+
+                queue.enqueueReadBuffer(outputBuffer, CL_TRUE, 0, 1920 * 1080 * 4, rgb.data);
 		toc = std::chrono::high_resolution_clock::now();
 		profile_time.resize += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
 	    
@@ -757,17 +670,10 @@ int main(int argc, char **argv) {
 		//image.convertTo(frame8, CV_8UC1, 1.0 / 16.0);
 		//cv::UMat u_raw8;
 		//u_raw12.convertTo(u_raw8, CV_8UC1, 1.0 / 16.0);
+		tic = std::chrono::high_resolution_clock::now();
+
 
 		ret |= buffers->QueueBuffers();
-
-
-		//cv::Mat mat = u_raw12.getMat(cv::ACCESS_READ);
-		//cv::Mat output_image = cv::Mat(h, w, CV_8U, output_data);
-		//cv::Mat output_image = cv::Mat(h, w, CV_8U, mapped_output);
-		// 1. Map OpenCL output buffer to host memory
-		// 3. Unmap the buffer after OpenCV processing
-
-		//queue.enqueueUnmapMemObject(outputBuffer, mapped_output);
 		
 		//queue.enqueueUnmapMemObject(outputBuffer3d, mapped_output);
 		//queue.finish();
@@ -779,19 +685,9 @@ int main(int argc, char **argv) {
 		toc = std::chrono::high_resolution_clock::now();
 		profile_time.debayer += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
 
-		//cv::Mat show_image;
-		//tic = std::chrono::high_resolution_clock::now();
-		//rgb_image.convertTo(show_image, CV_8UC3, 1.0 / 16.0);
-
-		//toc = std::chrono::high_resolution_clock::now();
-		//profile_time.resize += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
-		//cv::Mat show_image;
-		//output_image.convertTo(show_image, CV_8UC1, 1.0 / 16.0);
 		tic = std::chrono::high_resolution_clock::now();
-		//cv::UMat colorImage8U;
-		//colorImage.convertTo(colorImage8U, CV_8UC3, 1.0 / 16.0);
-		//image.convertTo(frame8, CV_8UC1, 1.0 / 16.0);
-		//cv::imshow("VIDEO", rgb); 
+
+		cv::imshow("VIDEO", rgb); 
 		
 	    } // end else true
 
@@ -805,9 +701,7 @@ int main(int argc, char **argv) {
 
 	//tic = std::chrono::high_resolution_clock::now();
 	//cv::imshow("VIDEO", image);
-	//int key = cv::pollKey();
-	int key =22;
-
+	int key = cv::pollKey();
 	toc = std::chrono::high_resolution_clock::now();
 	profile_time.show +=  std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
 	
