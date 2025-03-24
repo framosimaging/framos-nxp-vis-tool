@@ -23,7 +23,6 @@ V4l2Buffers::V4l2Buffers(int32_t fd, int32_t dma_mem, uint32_t size_image)
   :fd_(fd), dma_mem_(dma_mem), size_image_(size_image) {
   v4l2_memory_ = (dma_mem == 1) ? V4L2_MEMORY_DMABUF : V4L2_MEMORY_MMAP;
   memset(&req_bufs_, 0, sizeof(req_bufs_));
-  // TODO: check
   memset(&buf_addrs_, 0, sizeof(buf_addrs_));
   memset(&buf_addr, 0, sizeof(buf_addr));
 }
@@ -262,8 +261,6 @@ bool DMABuffers::AllocateBuffers() {
 	std::cerr << " EXPBUFFER DMA_BUF_IOCTL_PHYS error \n" << buffers[i].dma_fd << std::endl;
 	return false;
     }
-    std::cout << "raw data" << buffers[i].rawData << std::endl;
-    std::cout << "buffer address: " << buf_addrs_[i].phys << std::endl;
   }
 
   return true;

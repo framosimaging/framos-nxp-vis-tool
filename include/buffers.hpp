@@ -14,8 +14,6 @@ struct V4l2Buffer {
     int32_t dma_fd = -1; // file descriptor used for dma buffer
 };
 
-
-
 class V4l2Buffers {
 public:
   V4l2Buffers(int32_t fd, int32_t dma_mem, uint32_t size_image);

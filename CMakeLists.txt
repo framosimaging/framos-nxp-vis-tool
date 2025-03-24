@@ -17,9 +17,9 @@ find_package(OpenCV REQUIRED)
 find_package(OpenCL REQUIRED)
 
 # Add the executable
-add_executable(display_image src/display_image.cpp src/v4l2_subdevice_controls.cpp src/buffers.cpp)
+add_executable(display_image src/display_image.cpp src/v4l2_subdevice_controls.cpp src/buffers.cpp src/image_processor.cpp src/viv_controls.cpp)
 
-# Link OpenCV libraries
+# Link libraries
 target_include_directories(display_image PRIVATE ${OpenCV_INCLUDE_DIRS} ${OpenCL_INCLUDE_DIRS})
 target_link_libraries(display_image PRIVATE ${OpenCV_LIBS} ${OpenCL_LIBRARIES} g2d)
 

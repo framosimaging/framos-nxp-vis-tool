@@ -6,9 +6,9 @@
 	"pixel_format": "RG12",
 	"verbose": true,
 	"v4l2_subdevice_config": {
-		"Frame rate": 50,
-		"Gain": 600
+		"Frame rate": 10,
+		"Gain": 300
 	},
 	"save_image": false,
-	"use_gpu": true
+	"use_gpu": false
 }
