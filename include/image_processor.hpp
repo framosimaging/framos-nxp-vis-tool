@@ -9,7 +9,6 @@
 #include <opencv2/highgui.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
 #include <opencv2/imgcodecs/imgcodecs.hpp>
-//#include <opencv2/core/ocl.hpp>
 
 #include <CL/opencl.hpp>
 
@@ -34,6 +33,8 @@ protected:
     struct ProfileInfo profile_info = {};
     int width_;
     int height_;
+    uint32_t pixel_format_;
+
 private:
     uint32_t visualize_num_ = 100;
     uint32_t count_frames_ = 0;
@@ -51,21 +52,22 @@ public:
 // Derived class for CPU processing
 class CPUImageProcessor : public ImageProcessor {
 public:
-    CPUImageProcessor(int width, int height); // Constructor
-    ~CPUImageProcessor(); // Constructor
+    CPUImageProcessor(int width, int height, uint32_t pixel_format);
+    ~CPUImageProcessor();
     void convertBigToLittleEndian(cv::Mat& image);
     void ProcessImage(uint8_t *image_data) override;
     void ProcessImage(struct dma_buf_phys *buf) override {
         std::cout << "CPUImageProcessor does not use dma_buf_phys!" << std::endl;
     }
-
+private:
+    double conversion_factor_ = 0.0;
 };
 
 // Derived class for G2D processing
 class G2DImageProcessor : public ImageProcessor {
 public:
-    G2DImageProcessor(int width, int height, uint32_t pixel_format); // Constructor
-    ~G2DImageProcessor(); // Constructor
+    G2DImageProcessor(int width, int height, uint32_t pixel_format);
+    ~G2DImageProcessor();
     void ProcessImage(uint8_t* image_data) override {
         std::cout << "G2DImageProcessor does not use uint8_t* image data!" << std::endl;
     }
@@ -81,7 +83,7 @@ private:
 // Derived class for GPU processing
 class GPUImageProcessor : public ImageProcessor {
 public:
-    GPUImageProcessor(int width, int height);
+    GPUImageProcessor(int width, int height, uint32_t pixel_format);
     ~GPUImageProcessor();
     void ProcessImage(uint8_t *image_data) override;
 
@@ -89,6 +91,7 @@ public:
         std::cout << "GPUImageProcessor does not use dma_buf_phys!" << std::endl;
     }
 private:
+    int bit_width_ = 8;
     cl::Device device;
     cl::Context context;
     cl::CommandQueue queue;

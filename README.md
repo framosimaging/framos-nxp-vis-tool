@@ -1,12 +1,13 @@
 # Framos Visualization / Streaming Tool for NXP platforms
 
-This tool enables streaming using v4l2 framework of camera sensors on NXP platforms using available optimizations to reduce resources usage. The tool is made as an alternative for `gstreamer` for developers who need features not supported by `gstreamer` or would prefer more hands on approach to implement optimizations for theire systems.
+This tool enables streaming using v4l2 framework of camera sensors on NXP platforms using available optimizations to reduce resources usage. The tool is made as an alternative for `gstreamer` for developers who need features not supported by `gstreamer` or would prefer more hands on approach to implement optimizations for their systems.
 
 Key features:
+
 - Use direct access memory (DMA) for streaming to reduce usage resources
 - Use GPU for image transformations (changing of image formats, debayering)
 - Use v4l2 or vivante controls to set stream properties / ISP functions
-- Output the image as OpenCV `CV:Mat` object for easy debugging. 
+- Output the image as OpenCV `CV:Mat` object for easy debugging.
 
 ## Limitations
 
@@ -15,7 +16,7 @@ but could be build for other versions as well.
 
 ## Using the tool
 
-If you just want to get the stream and visulization as fast as possible download the application from `./build/display_image` and configuration `./config/config.json` and save it to the platform.
+If you just want to get the stream and visualization as fast as possible download the application from `./build/display_image` and configuration `./config/config.json` and save it to the platform.
 
 Open the wayland terminal or connect to the board via Terra term or ssh connection and run
 
@@ -53,11 +54,12 @@ Descriptions of available parameters:
 - `use_gpu` - only important if raw stream is used, use false if you want to debug the application using opencv, set to true if you want to move some computation (endian conversion, debayering) to GPU
 - `v4l2_subdevice_config` - you can use this settings to set stream properties using subdevice, check 
 `v4l2-ctl --device=/dev/v4l-subdev1 --list-ctrls` available features for your sensor. To change `data rate`, `frame rate`, `shutter` you must use this controls, you can use vivante controls to set exposure, gain, auto white balance and other ISP functions.
-- `-m` cache memory parametar, set to 0 if you wo not want to use cache memory, set to 1 to use dma cache (preffered as this speeds up the system, use the opter options only if you need cache memory for different part of your system)
+- `-m` cache memory parameter, set to 0 if you wo not want to use cache memory, set to 1 to use dma cache (preferred as this speeds up the system, use the other options only if you need cache memory for different part of your system)
 
 ## Architecture of the system
 
 There are three main parts of the system
+
 - Image Streaming (Buffers)
 - Image Processing Conversion of image and visualization
 - Setting image controls ()
@@ -68,7 +70,7 @@ There are three main parts of the system
 
 ## Description of the available Image Processing Modes
 
-In the Image Processing mode you can use function ProcessImage to adapt it for your use case. Currently it is used for Debayering and Visualization of Image by OpenCV.
+In the Image Processing mode you can use function ProcessImage to adapt it for your use case. Currently it is used for debayering and visualization of Image by OpenCV.
 
 ### Default mode (using ISP and gpu optimizations)
 
@@ -86,15 +88,17 @@ Use of OpenCL for image transformations. This allows you a lot of flexibility fo
 
 ## Image/Streaming controls
 
-You can use ISP (vivante) controls for setting ISP image if you use ISP supported formats (`YUYV`, `NV12` or `NV16`). 
+You can use ISP (vivante) controls for setting ISP image if you use ISP supported formats (`YUYV`, `NV12` or `NV16`).
 
 ### Vivante controls
 
-There is a simple example of turning auto exposure on and off in `display_image.cpp`, you can also change the default parameters defined in isp xml configuration file in the similar way. To set the functionality that you need use `i.MX 8M Plus Camera and Display Guide.pdf` documentation and the approriate string controls defined in `ioctl_cmds.h`. 
+There is a simple example of turning auto exposure on and off commented in `display_image.cpp`. You can also change the default parameters defined in isp xml configuration file in the similar way. To set the functionality that you need use `i.MX 8M Plus Camera and Display Guide.pdf` documentation and the appropriate string controls defined in `ioctl_cmds.h`.
 
 ### V4l2 controls
 
 To use subdevice controls (V4L2_CID controls defined in imx<ID>_mipi.c) driver you can set the values in this way. Some controls are not supported as Vivante controls (frame rate and data rate for instance so you need this approach). Fow raw image streaming Vivante controls are not enabled so you must use this controls.
+
+Here is an example of configuration that you can add to configuration file.
 
 ``` bash
 "v4l2_subdevice_config": {
@@ -105,7 +109,7 @@ To use subdevice controls (V4L2_CID controls defined in imx<ID>_mipi.c) driver y
 }
 ```
 
-You can use also this commands from terminal:
+You can use also this commands from terminal while streaming
 
 ``` bash
 v4l2-ctl -d /dev/v4l-subdev1 -l
@@ -117,7 +121,7 @@ v4l2-ctl -d /dev/v4l-subdev1 -c frame_rate=20
 ### Requirements
 
 Installed toolchain for NXP for full image or some arm compiler for arm64 with all libraries available, install cmake (tested on version 3.27.5).
-You should install the toolchain as dessribed in the instructions in i.MX_Yocto_Project_User's_Guide document from documentation. Here is the needed configuration:
+You should install the toolchain as described in the instructions in i.MX_Yocto_Project_User's_Guide document from documentation. Here is the needed configuration:
 
 ``` bash
 DISTRO=fsl-imx-wayland MACHINE=imx8mp-lpddr4-evk source imx-setup-release.sh -b build-wayland
@@ -150,10 +154,11 @@ cmake --build .
 ```
 
 ## Other information 
+
 Files with examples
 ~/isp-imx-4.2.2.24.1/appshell/v4l_drm_test/video_test.cpp (file with example how to use dma memory for gpu)
 
-Gstremaer commands to use dma buffers:
+Gstreamer commands to use dma buffers:
 
 ``` bash
 gst-launch-1.0 -v v4l2src device=/dev/video2 io-mode=mmap ! queue ! waylandsink
@@ -164,4 +169,3 @@ gst-launch-1.0 -v v4l2src device=/dev/video2 io-mode=dma-buff ! queue ! waylands
 
 - [i.MX 8M Plus Camera and Display Guide](https://www.nxp.com/docs/en/user-guide/iMX8MP_CAMERA_DISPLAY_GUIDE.pdf)
 - [i.MX Graphics User's Guide](https://www.nxp.com/docs/en/user-guide/IMX_GRAPHICS_USERS_GUIDE.pdf)
-

@@ -70,16 +70,4 @@ private:
   int dma_fd_;
 };
 
-class DMAGPUBuffers : public V4l2Buffers
-{
-public:
-  DMAGPUBuffers(int32_t fd, int32_t dma_mem, uint32_t size_image)
-    :V4l2Buffers(fd, dma_mem, size_image) {};
-  ~DMAGPUBuffers() {}
-  bool AllocateBuffers() override; // 
-
-private:
-  bool test2;
-};
-
 #endif // V4L2_BUFFERS_H

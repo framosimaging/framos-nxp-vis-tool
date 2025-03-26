@@ -75,7 +75,6 @@ int viv_get_ctrl(int fd, const char* config_id) {
 	    std::cerr << "Result field not found in viv controls response "<< std::endl;
 	    return 1;
 	}
-
 }
 
 int viv_set_ctrl(int fd, const char* config_id, const std::string& key, const nlohmann::json& value) {
@@ -94,8 +93,6 @@ int viv_set_ctrl(int fd, const char* config_id, const std::string& key, const nl
 
 	std::string json_dump = j.dump();
         const char* json_str = json_dump.c_str();
-	//const char *json_str = (char *)"{<id>:<ae.s.en>;<enable>:false}";
-	//{<id>:<ae.s.cfg>;<weights>:16,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}
 
 	strncpy(viv_ctrl.string, json_str, VIV_JSON_BUFFER_SIZE - 1);
 
@@ -107,5 +104,6 @@ int viv_set_ctrl(int fd, const char* config_id, const std::string& key, const nl
 		return ret;
 	}
 	std::cout << "Finished setting viv controls" << viv_ctrl.string << std::endl;
+
 	return 0;
 }

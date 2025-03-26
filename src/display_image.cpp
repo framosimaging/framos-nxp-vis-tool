@@ -12,7 +12,6 @@
 #include <iostream>
 #include <unistd.h>
 #include <string>
-//#include <algorithm>
 #include <vector>
 #include <chrono>
 #include <sys/ioctl.h>
@@ -20,6 +19,7 @@
 #include <dirent.h>
 #include <fnmatch.h>
 #include <fcntl.h>
+#include <fstream>
 
 #include <linux/videodev2.h>
 
@@ -29,11 +29,9 @@
 
 #define CL_HPP_TARGET_OPENCL_VERSION 300
 
-#include <fstream>
-//using json = nlohmann::json;
+using json = nlohmann::json;
 
 bool xioctl(int fd, unsigned long request, void* arg);
-void DrawFps(cv::Mat &mat, uint32_t displayFps);
 
 enum BitWidth {
   EightBits = 8,
@@ -48,7 +46,7 @@ const std::map<std::string, uint32_t> abbrev_to_pixel_fmt = {
     {"YUYV", V4L2_PIX_FMT_YUYV},
     {"NV12", V4L2_PIX_FMT_NV12}, 
     {"NV16", V4L2_PIX_FMT_NV16},
-    {"RG10", V4L2_PIX_FMT_SRGGB10}, // not supported
+    {"RG10", V4L2_PIX_FMT_SRGGB10},
     {"RG12", V4L2_PIX_FMT_SRGGB12},
 };
 
@@ -83,11 +81,11 @@ struct CameraConfiguration {
     bool use_gpu = true;
 };
 
-static int ParseArguments(int argc, char **argv, nlohmann::json *json_config, CameraConfiguration *cam_conf, int* dma_mem) {
+static int ParseArguments(int argc, char **argv, json *json_config, CameraConfiguration *cam_conf, int* dma_mem) {
     CLI::App app{"Display Image Example CLI"};
 
     std::string config_file="config.json";
-    nlohmann::json config;
+    json config;
     app.add_option("-b,--bit-width", cam_conf->bit_width, "Bit width 8, 10, 12, default -b 12")
     	->check(CLI::IsMember({8, 10, 12}));
     app.add_option("-m,--dma-mem", *dma_mem, "add this flag -m for choosing memory type 0 - mmap, 1 - cma, 2 dma-gpu")
@@ -158,7 +156,7 @@ int main(int argc, char **argv) {
     CameraConfiguration cam_conf;
     int dma_fd;
     int dma_mem = 0;
-    nlohmann::json json_config;
+    json json_config;
 
     int ret = ParseArguments(argc, argv, &json_config, &cam_conf, &dma_mem);
     if (ret < 1) {
@@ -167,6 +165,7 @@ int main(int argc, char **argv) {
     }
     std::cout << "profiling = " << cam_conf.profile << std::endl;
     std::cout << "dma mem = " << dma_mem << std::endl;
+
     // Open video device
     int fd = ::open(cam_conf.camera_id.c_str(), O_RDWR);
     if (fd == -1) {
@@ -181,6 +180,10 @@ int main(int argc, char **argv) {
         return ret;
     }
 
+    /* 
+    //Example how to set vivante controls from ISP,
+
+    // reading auto exposure configuration
     std::cout << "Calling viv get control" << std::endl;
     ret = viv_get_ctrl(fd, IF_AE_G_EN);
     if (ret > 0) {
@@ -188,25 +191,27 @@ int main(int argc, char **argv) {
 	return 1;
     }
 
+    // setting auto exposure configuration to false
     std::cout << "Calling viv set control" << std::endl;
     ret = viv_set_ctrl(fd, IF_AE_S_EN, "enable", false);
     if (ret > 0) {
 	std::cerr << "Setting viv controls failed" << std::endl;
 	return 1;
     }
-    std::cout << "Finished calling viv controls" << std::endl;
 
+    // check if the value was set properly
     std::cout << "Calling viv get control" << std::endl;
     ret = viv_get_ctrl(fd, IF_AE_G_EN);
     if (ret > 0) {
 	std::cerr << "Getting viv controls failed" << std::endl;
 	return 1;
     }
+    */
 
     // Open subdevice and set v4l2 controls, if you plan to use default settings for
     // frame rate, data rate, shutter, etc. you can remove this part
     // For exposure and gain it is recommended to use viv controls.
-    nlohmann::json v4l2_controls = json_config["v4l2_subdevice_config"];
+    json v4l2_controls = json_config["v4l2_subdevice_config"];
     V4l2Subdevice v4l2_subdevice(cam_conf.subdevice_id, v4l2_controls);
     v4l2_subdevice.run();
 
@@ -254,9 +259,9 @@ int main(int argc, char **argv) {
     else {
       raw_stream = true;
       if (!cam_conf.use_gpu)
-          image_processor = std::make_unique<CPUImageProcessor>(width, height);
+          image_processor = std::make_unique<CPUImageProcessor>(width, height, pix_fmt.pixelformat);
       else
-          image_processor = std::make_unique<GPUImageProcessor>(width, height);
+          image_processor = std::make_unique<GPUImageProcessor>(width, height, pix_fmt.pixelformat);
     }
 
     auto ts_loop = std::chrono::system_clock::now();
@@ -264,7 +269,6 @@ int main(int argc, char **argv) {
     uint8_t *image_data;
     while (true) {
 	ret = buffers->DequeueBuffers(&image_data);
-
 
 	if (!raw_stream) {
 	    image_processor->ProcessImage(&buffers->buf_addr);
@@ -293,7 +297,6 @@ int main(int argc, char **argv) {
 		}
 		image_processor->PrintProfiling();
 	};
-
     }
 
     cv::destroyAllWindows();
@@ -315,47 +318,3 @@ bool xioctl(int fd, unsigned long request, void* arg) {
     }
     return retry_attempts != max_retry;
 }
-/*
-
-void DrawFps(cv::Mat &mat, uint32_t displayFps)
-{
-    std::string fpsText =  std::to_string(displayFps) + " fps";
-    int fpsFont = cv::FONT_HERSHEY_SIMPLEX;
-    double fpsScale = 0.7;
-    int fpsThickness = 1;
-    cv::Point fpsPoint(10, 30);
-    uint32_t grayBackground;
-    uint32_t grayText;
-
-
-    if (mat.depth() == CV_8U) {
-        grayBackground = 0x20;
-        grayText = 0xd0;
-    } else if (mat.depth() == CV_16U) {
-        grayBackground = 0x2000;
-        grayText = 0xd000;
-    } else {
-        throw std::invalid_argument("Unsupported bit depth");
-    }
-    int fpsBaseline;
-    cv::Size fpsSize = cv::getTextSize(fpsText, fpsFont, fpsScale, fpsThickness, &fpsBaseline);
-
-    cv::rectangle(
-        mat,
-        fpsPoint + cv::Point(0, fpsBaseline),
-        fpsPoint + cv::Point(fpsSize.width, -fpsSize.height - 5),
-        cv::Scalar(grayBackground, grayBackground, grayBackground),
-        cv::FILLED
-    );
-
-    cv::putText(
-        mat, 
-        fpsText,
-        fpsPoint,
-        fpsFont,
-        fpsScale,
-        cv::Scalar(grayText, grayText, grayText),
-        fpsThickness
-    );
-}
-*/

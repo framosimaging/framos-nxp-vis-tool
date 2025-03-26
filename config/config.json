@@ -3,12 +3,11 @@
 	"subdevice_id": "/dev/v4l-subdev1",
 	"resize": [1280, 720],
 	"resolution": [1920, 1080],
-	"pixel_format": "RG12",
+	"pixel_format": "YUYV",
 	"verbose": true,
 	"v4l2_subdevice_config": {
 		"Frame rate": 10,
 		"Gain": 300
 	},
-	"save_image": false,
-	"use_gpu": false
+	"use_gpu": true
 }

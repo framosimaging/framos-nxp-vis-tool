@@ -3,7 +3,6 @@
 #include <ctime>
 
 bool ImageProcessor::SaveImage() {
-    std::cout << "Saving image " << std::endl;
     char timestamp[20];
 
     // Get current time
@@ -27,7 +26,7 @@ void ImageProcessor::PrintProfiling() {
 		std::cout << "Copy buffer time: " << profile_info.copy_buffer / visualize_num_ << " ms" << std::endl;
 		std::cout << "Resize image time: " << profile_info.resize / visualize_num_ << " ms" << std::endl;
 		std::cout << "Convert image time: " << profile_info.visualize / visualize_num_ << " ms" << std::endl;
-		std::cout << "Debayer time: " << profile_info.debayer / visualize_num_ << " ms" << std::endl;
+		std::cout << "Debayering time: " << profile_info.debayer / visualize_num_ << " ms" << std::endl;
 		std::cout << "Show image time: " << profile_info.show / visualize_num_ << " ms" << std::endl;
 		std::cout << "Endian conversion: " << profile_info.endian_conv / visualize_num_ << " ms" << std::endl;
 		count_frames_ = 0;
@@ -39,17 +38,26 @@ void ImageProcessor::PrintProfiling() {
 		//profile_info->draw_fps = 0;
 		profile_info.show = 0;
 		profile_info.endian_conv = 0;
-
 	}
 	else {
 		count_frames_ += 1;
 	}
-
 }
 
-CPUImageProcessor::CPUImageProcessor(int width, int height) {
+CPUImageProcessor::CPUImageProcessor(int width, int height, uint32_t pixel_format) {
     width_ = width;
     height_ = height;
+    pixel_format_ = pixel_format;
+
+    if (pixel_format_ == V4L2_PIX_FMT_SRGGB12) {
+	conversion_factor_ = 1. / 16;
+    }
+    else if (pixel_format_ == V4L2_PIX_FMT_SRGGB10) {
+	conversion_factor_ = 1. / 4;
+    }
+    else 
+    	std::cerr << "This image format is not supported" << std::endl;
+
     std::cout << "CPU Image Processor created." << std::endl;
 }
 
@@ -84,7 +92,8 @@ void CPUImageProcessor::ProcessImage(uint8_t *image_data) {
 	profile_info.endian_conv += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
 	
 	tic = std::chrono::high_resolution_clock::now();
-	image.convertTo(processed_image, CV_8UC1, 1.0 / 16.0);
+	// conversion_factor
+	image.convertTo(processed_image, CV_8UC1, conversion_factor_);
 	toc = std::chrono::high_resolution_clock::now();
 	profile_info.resize += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
 
@@ -103,6 +112,8 @@ void CPUImageProcessor::ProcessImage(uint8_t *image_data) {
 G2DImageProcessor::G2DImageProcessor(int width, int height, uint32_t pixel_format) {
     width_ = width;
     height_ = height;
+    pixel_format_ = pixel_format;
+    
     if (pixel_format == V4L2_PIX_FMT_YUYV) {
 	g2_format = G2D_YUYV;
     }
@@ -116,7 +127,7 @@ G2DImageProcessor::G2DImageProcessor(int width, int height, uint32_t pixel_forma
     }
 
     if (g2d_open(&g2d_handle)) {
-	printf("g2d_open fail.\n");
+	std::cerr << "g2d_open error..." << std::endl;
 	//return -ENOTTY;
     }
     d_buf = g2d_alloc(width_ * height_ * 4, 2);
@@ -175,9 +186,8 @@ void G2DImageProcessor::ProcessImage(struct dma_buf_phys *buf_addr) {
     profile_info.visualize += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
 }
 
-
 const char *demosaicKernel = R"(
-	__kernel void demosaic(__global const ushort* src, __global uchar4* dst, int width) {
+	__kernel void demosaic(__global const ushort* src, __global uchar4* dst, int width, int bit_width) {
 	    int i = get_global_id(1) * 2;
 	    int j = get_global_id(0) * 2;
 	    
@@ -185,6 +195,8 @@ const char *demosaicKernel = R"(
 	    int idxG1 = i * width + j + 1;
 	    int idxG2 = (i + 1) * width + j;
 	    int idxB  = (i + 1) * width + j + 1;
+
+	    int bit_shift = 16 - bit_width;
     
 	    if (i + 1 >= get_global_size(1) * 2 || j + 1 >= get_global_size(0) * 2)
 		return;
@@ -196,10 +208,10 @@ const char *demosaicKernel = R"(
 	    ushort b = src[idxB];
     
 	    // Convert 16-bit values to 8-bit (preserving high bits)
-	    uchar R  = (uchar) ((r >> 12) | (r << 4));
-	    uchar G1 = (uchar) ((g1 >> 12) | (g1 << 4));
-	    uchar G2 = (uchar) ((g2 >> 12) | (g2 << 4));
-	    uchar B  = (uchar) ((b >> 12) | (b << 4));
+	    uchar R  = (uchar) ((r >> bit_width) | (r << bit_shift));
+	    uchar G1 = (uchar) ((g1 >> bit_width) | (g1 << bit_shift));
+	    uchar G2 = (uchar) ((g2 >> bit_width) | (g2 << bit_shift));
+	    uchar B  = (uchar) ((b >> bit_width) | (b << bit_shift));
     
 	    // Store output as uchar3 (B, G, R format)
 	    uchar4 pixel1 = (uchar4)(B, G1, R, 255);
@@ -214,10 +226,17 @@ const char *demosaicKernel = R"(
     )";
 
 // Constructor for GPUImageProcessor
-GPUImageProcessor::GPUImageProcessor(int width, int height) {
+GPUImageProcessor::GPUImageProcessor(int width, int height, uint32_t pixel_format) {
     width_ = width;
     height_ = height;
+    pixel_format_ = pixel_format;
     std::cout << "GPU Image Processor created." << std::endl;
+    if (pixel_format_ == V4L2_PIX_FMT_SRGGB12) {
+	bit_width_ = 12;
+    }
+    else if (pixel_format_ == V4L2_PIX_FMT_SRGGB10) {
+	bit_width_ = 10;
+    }
 
     device = cl::Device::getDefault();
     context = cl::Context(device);
@@ -236,12 +255,11 @@ GPUImageProcessor::GPUImageProcessor(int width, int height) {
     
 }
 
-// Constructor for GPUImageProcessor
 GPUImageProcessor::~GPUImageProcessor() {
 	std::cout << "GPU Image Processor created." << std::endl;
     }
 
-// Implementation of ProcessImage for GPU
+// Implementation of ProcessImage for GPU using OpenCL
 void GPUImageProcessor::ProcessImage(uint8_t *image_data) {
 	cl::NDRange globalSize(width_ / 2, height_ / 2);
 
@@ -251,6 +269,7 @@ void GPUImageProcessor::ProcessImage(uint8_t *image_data) {
 	kernel.setArg(0, inputBuffer);
 	kernel.setArg(1, outputBuffer);
 	kernel.setArg(2, width_);
+	kernel.setArg(3, bit_width_);
 	auto toc = std::chrono::high_resolution_clock::now();
 	profile_info.copy_buffer += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
 

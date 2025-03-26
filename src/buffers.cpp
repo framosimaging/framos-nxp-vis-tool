@@ -73,12 +73,7 @@ bool V4l2Buffers::DequeueBuffers(uint8_t **image_data) {
   bool success;
   buf_.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
   buf_.memory = v4l2_memory_;
-  
-  /*if (dma_mem_ == 1)
-    buf.memory = V4L2_MEMORY_DMABUF;
-  else 
-    buf.memory = V4L2_MEMORY_MMAP;
-  */
+
   success = yioctl(fd_, VIDIOC_DQBUF, &buf_);
   if (!success) {
     std::cerr << "VIDIOC_DQBUF failed" << strerror(errno) << std::endl;
@@ -118,8 +113,7 @@ bool V4l2Buffers::CaptureFrame(uint8_t* output) {
       std::cerr << "VIDIOC_DQBUF failed" << std::endl;
       return false;
    }
-    // REFACTOR
-    //frame = cv::Mat(1080 + 1080 / 2, 1920, CV_8UC1, &buffers[buf.index].rawData[0]);
+
   memcpy(output, &buffers[buf.index].rawData[0], size_image_);
   success = yioctl(fd_, VIDIOC_QBUF, &buf);
   if (!success) {
@@ -170,7 +164,6 @@ void V4l2Buffers::ReleaseBuffers() {
     buffers[i].rawLength = 0;
   }
 }
-
 
 bool MMAPBuffers::AllocateBuffers() {
   for (uint32_t i = 0; i < buffers.size(); i++) {
@@ -278,8 +271,3 @@ cleanup:
     close(dma_fd_);
     return false;
 } 
-
-
-bool DMAGPUBuffers::AllocateBuffers() {
-  return true;
-}
