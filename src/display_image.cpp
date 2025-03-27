@@ -33,12 +33,6 @@ using json = nlohmann::json;
 
 bool xioctl(int fd, unsigned long request, void* arg);
 
-enum BitWidth {
-  EightBits = 8,
-  TenBits = 10,
-  TwelveBits = 12
-};
-
 const std::map<std::string, uint32_t> abbrev_to_pixel_fmt = {
     {"GRAY", V4L2_PIX_FMT_GREY}, // not supported
     {"Y10", V4L2_PIX_FMT_Y10},   // not supported
@@ -50,23 +44,17 @@ const std::map<std::string, uint32_t> abbrev_to_pixel_fmt = {
     {"RG12", V4L2_PIX_FMT_SRGGB12},
 };
 
-//TODO: use this
-const std::map<std::string, uint8_t> abbrev_to_memory_fmt = {
-  {"mmap", V4L2_MEMORY_MMAP},
-  {"dma", V4L2_MEMORY_DMABUF},
+// TODO: add when gray formats are supported
+enum BitWidth {
+	EightBits = 8,
+	TenBits = 10,
+	TwelveBits = 12
 };
 
 const std::map<BitWidth, uint32_t> bits_to_pixel_fmt = {
     {EightBits, V4L2_PIX_FMT_GREY},
     {TenBits, V4L2_PIX_FMT_Y10},
-    //{TwelveBits, V4L2_PIX_FMT_SRGGB12}
-    {TwelveBits, V4L2_PIX_FMT_NV12}
-};
-
-const std::map<BitWidth, uint8_t> conversion_factor = {
-    {EightBits, 1},
-    {TenBits, 4},
-    {TwelveBits, 16}
+    {TwelveBits, V4L2_PIX_FMT_Y12}
 };
 
 struct CameraConfiguration {
@@ -79,6 +67,7 @@ struct CameraConfiguration {
     BitWidth bit_width = TwelveBits;
     bool profile = false;
     bool use_gpu = true;
+    bool dma_mem = true;
 };
 
 static int ParseArguments(int argc, char **argv, json *json_config, CameraConfiguration *cam_conf, int* dma_mem) {
@@ -88,8 +77,6 @@ static int ParseArguments(int argc, char **argv, json *json_config, CameraConfig
     json config;
     app.add_option("-b,--bit-width", cam_conf->bit_width, "Bit width 8, 10, 12, default -b 12")
     	->check(CLI::IsMember({8, 10, 12}));
-    app.add_option("-m,--dma-mem", *dma_mem, "add this flag -m for choosing memory type 0 - mmap, 1 - cma, 2 dma-gpu")
-    	->check(CLI::IsMember({0, 1, 2}));
     app.add_option("-c,--config", config_file, "Path to JSON configuration file, default is config.json");
 
     try {
@@ -115,6 +102,7 @@ static int ParseArguments(int argc, char **argv, json *json_config, CameraConfig
         cam_conf->pixel_format = config.value("pixel_format", "NV12");
         cam_conf->profile = config.value("verbose", cam_conf->profile);
 	cam_conf->use_gpu = config.value("use_gpu", cam_conf->use_gpu);
+	cam_conf->dma_mem = config.value("dma_mem", cam_conf->dma_mem);
     } catch (const std::exception& e) {
         std::cerr << "Error reading configuration: " << e.what() << std::endl;
         return 1;
@@ -129,7 +117,9 @@ static int ParseArguments(int argc, char **argv, json *json_config, CameraConfig
 	<< "\t Pixel Format: " << cam_conf->pixel_format << std::endl
 	<< "\t Frame rate: " << cam_conf->frame_rate << std::endl
 	//<< "Bit Width: " << (settings.bit_width == EightBits ? "8" : settings.bit_width == TenBits ? "10" : "12") << " bits\n"
-	<< "\t Profile: " << (cam_conf->profile ? "Enabled" : "Disabled") << std::endl ;
+	<< "\t Profile: " << (cam_conf->profile ? "Enabled" : "Disabled") << std::endl
+	<< "\t Cached Memory: " << (cam_conf->dma_mem ? "Enabled" : "Disabled") << std::endl;
+
 
     *json_config = config;
     return 1;
@@ -164,7 +154,6 @@ int main(int argc, char **argv) {
         return ret;
     }
     std::cout << "profiling = " << cam_conf.profile << std::endl;
-    std::cout << "dma mem = " << dma_mem << std::endl;
 
     // Open video device
     int fd = ::open(cam_conf.camera_id.c_str(), O_RDWR);
@@ -181,7 +170,7 @@ int main(int argc, char **argv) {
     }
 
     /* 
-    //Example how to set vivante controls from ISP,
+    // Example how to set vivante controls from ISP
 
     // reading auto exposure configuration
     std::cout << "Calling viv get control" << std::endl;
@@ -210,7 +199,6 @@ int main(int argc, char **argv) {
 
     // Open subdevice and set v4l2 controls, if you plan to use default settings for
     // frame rate, data rate, shutter, etc. you can remove this part
-    // For exposure and gain it is recommended to use viv controls.
     json v4l2_controls = json_config["v4l2_subdevice_config"];
     V4l2Subdevice v4l2_subdevice(cam_conf.subdevice_id, v4l2_controls);
     v4l2_subdevice.run();
@@ -219,10 +207,10 @@ int main(int argc, char **argv) {
     size_t buffer_size = pix_fmt.sizeimage;
 
     std::unique_ptr<V4l2Buffers> buffers; 
-    if (dma_mem == 0) {
-      buffers = std::make_unique<MMAPBuffers>(fd, dma_mem, pix_fmt.sizeimage);
-    } else if (dma_mem == 1) {
-      buffers = std::make_unique<DMABuffers>(fd, dma_mem, pix_fmt.sizeimage);
+    if (cam_conf.dma_mem) {
+	buffers = std::make_unique<DMABuffers>(fd, cam_conf.dma_mem, pix_fmt.sizeimage);
+    } else  {
+	buffers = std::make_unique<MMAPBuffers>(fd, cam_conf.dma_mem, pix_fmt.sizeimage);
     }
 
     std::cout << "Requesting Buffers " << std::endl;
@@ -269,7 +257,6 @@ int main(int argc, char **argv) {
     uint8_t *image_data;
     while (true) {
 	ret = buffers->DequeueBuffers(&image_data);
-
 	if (!raw_stream) {
 	    image_processor->ProcessImage(&buffers->buf_addr);
 	} else {

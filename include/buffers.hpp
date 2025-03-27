@@ -16,7 +16,7 @@ struct V4l2Buffer {
 
 class V4l2Buffers {
 public:
-  V4l2Buffers(int32_t fd, int32_t dma_mem, uint32_t size_image);
+  V4l2Buffers(int32_t fd, bool dma_mem, uint32_t size_image);
   ~V4l2Buffers();
   std::vector<V4l2Buffer> buffers;
   bool RequestBuffers();
@@ -33,7 +33,7 @@ public:
 
 protected:
 
-  int32_t dma_mem_;
+  bool dma_mem_;
   enum v4l2_memory v4l2_memory_;
   int32_t fd_;
   uint32_t size_image_;
@@ -52,9 +52,6 @@ public:
   
   bool AllocateBuffers() override; // 
   ~MMAPBuffers() {}
-
-private:
-  bool test2;
 };
 
 class DMABuffers : public V4l2Buffers

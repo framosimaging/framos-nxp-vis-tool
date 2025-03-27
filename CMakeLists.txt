@@ -10,14 +10,19 @@ add_definitions(-DCL_HPP_TARGET_OPENCL_VERSION=300)
 # Include the header directory
 include_directories(include config)
 
-# Find OpenCV package
+# Find OpenCV  package
 find_package(OpenCV REQUIRED)
 
 # Find OpenCL package
 find_package(OpenCL REQUIRED)
 
 # Add the executable
-add_executable(display_image src/display_image.cpp src/v4l2_subdevice_controls.cpp src/buffers.cpp src/image_processor.cpp src/viv_controls.cpp)
+add_executable(display_image 
+    src/display_image.cpp
+    src/v4l2_subdevice_controls.cpp
+    src/buffers.cpp
+    src/image_processor.cpp
+    src/viv_controls.cpp)
 
 # Link libraries
 target_include_directories(display_image PRIVATE ${OpenCV_INCLUDE_DIRS} ${OpenCL_INCLUDE_DIRS})

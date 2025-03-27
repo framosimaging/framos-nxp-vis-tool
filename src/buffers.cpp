@@ -19,9 +19,9 @@ bool yioctl(int fd, unsigned long request, void* arg) {
     return retry_attempts != max_retry;
 }
 
-V4l2Buffers::V4l2Buffers(int32_t fd, int32_t dma_mem, uint32_t size_image)
+V4l2Buffers::V4l2Buffers(int32_t fd, bool dma_mem, uint32_t size_image)
   :fd_(fd), dma_mem_(dma_mem), size_image_(size_image) {
-  v4l2_memory_ = (dma_mem == 1) ? V4L2_MEMORY_DMABUF : V4L2_MEMORY_MMAP;
+  v4l2_memory_ = (dma_mem) ? V4L2_MEMORY_DMABUF : V4L2_MEMORY_MMAP;
   memset(&req_bufs_, 0, sizeof(req_bufs_));
   memset(&buf_addrs_, 0, sizeof(buf_addrs_));
   memset(&buf_addr, 0, sizeof(buf_addr));
@@ -81,7 +81,6 @@ bool V4l2Buffers::DequeueBuffers(uint8_t **image_data) {
   }
   *image_data = &buffers[buf_.index].rawData[0];
   buf_addr = buf_addrs_[buf_.index];
-  //image_data = std::span<uint8_t>(buffers[buf_.index].rawData, buffers[buf_.index].rawLength);
 
   return true;
 }
@@ -103,10 +102,7 @@ bool V4l2Buffers::CaptureFrame(uint8_t* output) {
   bool success;
 
   buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-  if (dma_mem_ == 1)
-    buf.memory = V4L2_MEMORY_DMABUF;
-  else 
-    buf.memory = V4L2_MEMORY_MMAP;
+  buf.memory = (dma_mem_) ? V4L2_MEMORY_DMABUF : V4L2_MEMORY_MMAP;
 
   success = yioctl(fd_, VIDIOC_DQBUF, &buf);
     if (!success) {

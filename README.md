@@ -4,11 +4,13 @@ This tool enables streaming using v4l2 framework of camera sensors on NXP platfo
 
 Key features:
 
-- Mipi sensor mipi streaming using v4l2 framework
+- Image sensor streaming using v4l2 framework
 - Use direct access memory (DMA) for streaming to reduce usage resources
+- Also use dma memory buffers on GPU to avoid copying of buffers to GPU
 - Use GPU for image transformations (changing of image formats, debayering)
 - Use v4l2 or vivante controls to set stream properties / ISP functions
 - Output the image as OpenCV `CV:Mat` object for easy debugging.
+- No additional libraries needed - just download the tool and run it.
 
 ## Limitations
 
@@ -20,23 +22,24 @@ but could be build for other versions as well.
 If you just want to get the stream and visualization as fast as possible download the application from `./build/display_image` and configuration `./config/config.json` and save it to the platform. Open the wayland terminal, or connect to the board via Terra term or ssh connection and run
 
 ```bash
-./display_image -c config.json -m 1
+./display_image -c config.json
 ```
 
-You might need to set up the configuration file:
+You might need to set up the configuration `./config/config.json` file:
 
 ```bash
 {
-	"camera_id": "/dev/video2",
-	"subdevice_id": "/dev/v4l-subdev1",
-	"resolution": [1920, 1080],
-	"pixel_format": "YUYV",
-	"verbose": true,
-	"v4l2_subdevice_config": {
-		"Frame rate": 10,
-		"Gain": 300
-	},
-	"use_gpu": false
+ "camera_id": "/dev/video2",
+ "subdevice_id": "/dev/v4l-subdev1",
+ "resolution": [1920, 1080],
+ "pixel_format": "YUYV",
+ "verbose": true,
+ "v4l2_subdevice_config": {
+     "Frame rate": 10,
+     "Gain": 300
+  },
+"use_gpu": false,
+"dma_mem": true
 }
 ```
 
@@ -48,11 +51,12 @@ Descriptions of available parameters:
 - `pixel_format` - most important parameter 
 	- `YUYV`, `NV12`, `NV16` supported formats if you want to use Image Signal Processor (ISP) supported are  this will automaticaly set image processor pipelint to use g2d api and dma buffers.
 	- `RG10` and `RG12` for raw image streaming
+- `resolution` - set appropriate resolution supported for your sensor (isp mode in `start_isp.sh` should use the same mode)
 - `verbose` - set to true for profiling of application 
 - `use_gpu` - only important if raw stream is used, use false if you want to debug the application using opencv, set to true if you want to move some computation (endian conversion, debayering) to GPU
 - `v4l2_subdevice_config` - you can use this settings to set stream properties using subdevice, check 
 `v4l2-ctl --device=/dev/v4l-subdev1 --list-ctrls` available features for your sensor. To change `data rate`, `frame rate`, `shutter` you must use this controls, you can use vivante controls to set exposure, gain, auto white balance and other ISP functions.
-- `-m` cache memory parameter, set to 0 if you wo not want to use cache memory, set to 1 to use dma cache (preferred as this speeds up the system, use the other options only if you need cache memory for different part of your system)
+- `dma_mem` cache memory parameter, set to `false` if you wo not want to use cache memory, set to `true` to use dma cache (preferred as this speeds up the system, use the other options only if you need cache memory for different part of your system)
 
 ## Architecture of the system
 
@@ -170,7 +174,7 @@ cmake --build .
 the display_image application is located at `$REPO/build/display_image`. Copy the application to NXP platform and run it with
 
 ```bash
-./display_image -c config.json -m 1
+./display_image -c config.json
 ```
 
 For rebuilding the repo run:
@@ -179,13 +183,15 @@ For rebuilding the repo run:
 cmake --build . --target clean && cmake .. && cmake --build .
 ```
 
-## Other information 
+## Other information
 
 Files with examples
+
 ```bash
 ~/isp-imx-4.2.2.24.1/appshell/v4l_drm_test/video_test.cpp (file with example how to use dma memory for gpu)
 ~/isp-imx-4.2.2.24.1/appshell/vvext/vvext.cpp (file with example how to set vivante controls)
 ```
+
 Gstreamer commands using dma buffers:
 
 ``` bash

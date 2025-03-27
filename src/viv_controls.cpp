@@ -48,7 +48,7 @@ int viv_get_ctrl(int fd, const char* config_id) {
 
 	std::string json_dump = j.dump();
         const char* json_str = json_dump.c_str();
-	//const char *json_str = "{<id>:<ae.g.cfg>}";
+
 	strncpy(viv_ctrl.string, json_str, VIV_JSON_BUFFER_SIZE - 1);
 
 	int ret = ioctl(fd, VIDIOC_S_EXT_CTRLS, &viv_ctrls);

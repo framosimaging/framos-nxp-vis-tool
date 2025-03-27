@@ -17,7 +17,6 @@
 
 struct ProfileInfo {
 	long long deque;
-	long long show;
 	long long draw_fps;
 	long long queue;
 	long long visualize;

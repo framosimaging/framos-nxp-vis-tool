@@ -25,9 +25,8 @@ void ImageProcessor::PrintProfiling() {
 	if (count_frames_ == visualize_num_) { 
 		std::cout << "Copy buffer time: " << profile_info.copy_buffer / visualize_num_ << " ms" << std::endl;
 		std::cout << "Resize image time: " << profile_info.resize / visualize_num_ << " ms" << std::endl;
-		std::cout << "Convert image time: " << profile_info.visualize / visualize_num_ << " ms" << std::endl;
+		std::cout << "Visualize image time: " << profile_info.visualize / visualize_num_ << " ms" << std::endl;
 		std::cout << "Debayering time: " << profile_info.debayer / visualize_num_ << " ms" << std::endl;
-		std::cout << "Show image time: " << profile_info.show / visualize_num_ << " ms" << std::endl;
 		std::cout << "Endian conversion: " << profile_info.endian_conv / visualize_num_ << " ms" << std::endl;
 		count_frames_ = 0;
 		
@@ -36,7 +35,6 @@ void ImageProcessor::PrintProfiling() {
 		profile_info.resize = 0;
 		profile_info.visualize = 0;
 		//profile_info->draw_fps = 0;
-		profile_info.show = 0;
 		profile_info.endian_conv = 0;
 	}
 	else {
@@ -51,12 +49,10 @@ CPUImageProcessor::CPUImageProcessor(int width, int height, uint32_t pixel_forma
 
     if (pixel_format_ == V4L2_PIX_FMT_SRGGB12) {
 	conversion_factor_ = 1. / 16;
-    }
-    else if (pixel_format_ == V4L2_PIX_FMT_SRGGB10) {
+    } else if (pixel_format_ == V4L2_PIX_FMT_SRGGB10) {
 	conversion_factor_ = 1. / 4;
-    }
-    else 
-    	std::cerr << "This image format is not supported" << std::endl;
+    } else 
+	std::cerr << "This image format is not supported" << std::endl;
 
     std::cout << "CPU Image Processor created." << std::endl;
 }
@@ -92,7 +88,6 @@ void CPUImageProcessor::ProcessImage(uint8_t *image_data) {
 	profile_info.endian_conv += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
 	
 	tic = std::chrono::high_resolution_clock::now();
-	// conversion_factor
 	image.convertTo(processed_image, CV_8UC1, conversion_factor_);
 	toc = std::chrono::high_resolution_clock::now();
 	profile_info.resize += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
@@ -274,37 +269,19 @@ void GPUImageProcessor::ProcessImage(uint8_t *image_data) {
 	profile_info.copy_buffer += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
 
 	tic = std::chrono::high_resolution_clock::now();
-	//queue.enqueueNDRangeKernel(kernel, cl::NullRange, globalSize, localSize);
-	//queue.finish();
-
-	// Run Kernel Asynchronously
-	//cl::Event kernel_event;
-	//queue.enqueueNDRangeKernel(kernel, cl::NullRange, globalSize, cl::NullRange, nullptr, &kernel_event);
 
 	queue.enqueueNDRangeKernel(kernel, cl::NullRange, globalSize);
 	queue.finish();
 	toc = std::chrono::high_resolution_clock::now();
 	profile_info.endian_conv += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
+
 	tic = std::chrono::high_resolution_clock::now();
-
 	processed_image = cv::Mat(height_, width_, CV_8UC4);
-
 	queue.enqueueReadBuffer(outputBuffer, CL_TRUE, 0, width_ * height_* 4, processed_image.data);
 	toc = std::chrono::high_resolution_clock::now();
 	profile_info.resize += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();
 
-	// Wait only for this kernel (DO NOT CALL queue.finish())
-	//kernel_event.wait();
-
-	// test bit conversion
-
-	//queue.enqueueReadBuffer(outputBuffer, CL_TRUE, 0, numPixels, output_data);
-	//void* mapped_output = queue.enqueueMapBuffer(outputBuffer, CL_TRUE, CL_MAP_READ, 0, numPixels);
-	//queue.enqueueUnmapMemObject(outputBuffer, mapped_output);
-	//queue.finish(); // Ensure buffer is unmapped before next frame
-
 	tic = std::chrono::high_resolution_clock::now();
-
 	cv::imshow("VIDEO", processed_image);
 	toc = std::chrono::high_resolution_clock::now();
 	profile_info.visualize += std::chrono::duration_cast<std::chrono::milliseconds>(toc - tic).count();

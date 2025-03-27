@@ -1,13 +1,13 @@
 {
 	"camera_id": "/dev/video2",
 	"subdevice_id": "/dev/v4l-subdev1",
-	"resize": [1280, 720],
 	"resolution": [1920, 1080],
-	"pixel_format": "RG10",
+	"pixel_format": "RG12",
 	"verbose": true,
 	"v4l2_subdevice_config": {
-		"Frame rate": 10,
+		"Frame rate": 90,
 		"Gain": 300
 	},
-	"use_gpu": true
+	"use_gpu": true,
+	"dma_mem": true
 }
